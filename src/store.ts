@@ -53,49 +53,33 @@ export function createVectorStore(
 
 /**
  * Idempotent index bootstrap. Checks `describeIndex`; on "absent" error, calls
- * `createIndex`. Any other error propagates. Memoized per-store so subsequent
- * ops skip it.
+ * `createIndex`. Any other error propagates.
+ *
+ * NOT memoized: callers that need a guaranteed-fresh index (e.g., tests that
+ * drop+recreate between cases) rely on each call re-checking. The cost is one
+ * `describeIndex` roundtrip per call, which is negligible at boot-time cadence.
  *
  * R5: NOT called eagerly inside `createVectorStore`. Callers wrap it in the
  * same fail-soft net that catches store errors.
  */
-const ensuredStores = new WeakMap<MastraVector, Promise<void>>();
-
-export function ensureSchema(store: MastraVector): Promise<void> {
-  const existing = ensuredStores.get(store);
-  if (existing) return existing;
-
-  const p = (async () => {
-    try {
-      await store.describeIndex({ indexName: INDEX_NAME });
-      // Index exists — assume correct dimension. (Re-create is out of scope;
-      // a dimension mismatch would surface as a query-time error.)
-      return;
-    } catch (err) {
-      // Heuristic: "does not exist" / "not found" / "no such" / "unknown" →
-      // create. Anything else → throw. Covers pg ("relation does not exist")
-      // and libsql ("Table X not found") absent-index messages.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!/not exist|does not exist|not found|no such|unknown|absent|404/i.test(msg)) {
-        throw err;
-      }
-      await store.createIndex({
-        indexName: INDEX_NAME,
-        dimension: DIMENSION,
-        metric: METRIC,
-      });
+export async function ensureSchema(store: MastraVector): Promise<void> {
+  try {
+    await store.describeIndex({ indexName: INDEX_NAME });
+    // Index exists — assume correct dimension. (Re-create is out of scope;
+    // a dimension mismatch would surface as a query-time error.)
+    return;
+  } catch (err) {
+    // Heuristic: "does not exist" / "not found" / "no such" / "unknown" →
+    // create. Anything else → throw. Covers pg ("relation does not exist")
+    // and libsql ("Table X not found") absent-index messages.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/not exist|does not exist|not found|no such|unknown|absent|404/i.test(msg)) {
+      throw err;
     }
-  })();
-
-  ensuredStores.set(store, p);
-  return p;
-}
-
-/**
- * Reset the ensureSchema memo — for tests that need to re-bootstrap on a
- * fresh store.
- */
-export function _resetSchemaMemoForTests(): void {
-  // WeakMap has no clear(); tests should construct a fresh store instead.
-  // This function exists for API symmetry / future bookkeeping.
+    await store.createIndex({
+      indexName: INDEX_NAME,
+      dimension: DIMENSION,
+      metric: METRIC,
+    });
+  }
 }

@@ -35,24 +35,61 @@ export function unreachableStorageError(
  * that transient DB outages or ONNX load failures surface as branded results
  * rather than crashing the session.
  *
- * The `hintFor` callback receives the caught error and returns the actionable
- * hint to display. If it throws, a generic hint is used.
+ * The `classify` callback inspects the caught error and returns both the
+ * category prefix for the branded message and the actionable hint to display.
+ * A ready-made `defaultClassifier` covers the common embedder vs. storage
+ * split via heuristic message matching.
  */
+export type ErrorClassifier = (
+  err: unknown,
+) => { prefix: string; hint: string };
+
+/**
+ * Heuristic classifier — embedder/ONNX errors get a distinct branded prefix
+ * ("embedding unavailable") from storage errors ("storage unreachable"). Falls
+ * back to storage for anything ambiguous.
+ */
+export function defaultClassifier(err: unknown): {
+  prefix: string;
+  hint: string;
+} {
+  const msg = err instanceof Error ? err.message : String(err);
+  // ONNX load / fastembed init failures tend to mention onnx, model, or embed.
+  if (
+    /\b(onnx|fastembed|embed|model load|wasm)\b/i.test(msg)
+  ) {
+    return {
+      prefix: "embedding unavailable",
+      hint: "ensure the ONNX cache (~/.cache/mastra) is writable and the model files are intact; memorease runs memoryless until restart",
+    };
+  }
+  return {
+    prefix: "storage unreachable",
+    hint: "check the connection string or ensure Postgres/libsql is running; memorease runs memoryless until resolved",
+  };
+}
+
 export async function failSoft<T>(
   op: () => Promise<T>,
-  hintFor: (err: unknown) => string,
+  classify: ErrorClassifier = defaultClassifier,
 ): Promise<StorageResult<T>> {
   try {
     const value = await op();
     return { ok: true, value };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    let hint: string;
+    let classified: { prefix: string; hint: string };
     try {
-      hint = hintFor(err);
+      classified = classify(err);
     } catch {
-      hint = "check the plugin configuration and try again";
+      classified = {
+        prefix: "storage unreachable",
+        hint: "check the plugin configuration and try again",
+      };
     }
-    return unreachableStorageError(detail, hint);
+    return {
+      ok: false,
+      error: `memorease: ${classified.prefix} — ${detail}. Fix: ${classified.hint}. The session continues without memory; memory tools will return this error until it's resolved.`,
+    };
   }
 }

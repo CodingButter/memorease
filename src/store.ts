@@ -1,5 +1,9 @@
-import { PgVector } from "@mastra/pg";
-import { LibSQLVector } from "@mastra/libsql";
+// Both backend libraries (@mastra/libsql ~395ms native binding, @mastra/pg
+// ~25ms) are dynamic-imported on first store creation. Only the configured
+// backend is loaded — libsql users never pay the pg import cost and vice
+// versa. The type-only import below is erased at runtime.
+import type { PgVector } from "@mastra/pg";
+import type { LibSQLVector } from "@mastra/libsql";
 import type { MastraVector } from "@mastra/core/vector";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -26,29 +30,33 @@ export const METRIC = "cosine" as const;
 /**
  * Construct the backend vector store from a resolved config. Does NOT create
  * the index — that's the caller's responsibility (see `ensureSchema`).
+ *
+ * Async because the backend libraries are dynamic-imported here so plugin
+ * import doesn't pay for them. The chosen backend is the only one loaded.
  */
-export function createVectorStore(
+export async function createVectorStore(
   config: ResolvedConfig,
-): MastraVector {
+): Promise<MastraVector> {
   if (config.backend === "pg") {
     if (!config.connectionString) {
       throw new Error(
         "pg backend selected but no connection string was resolved",
       );
     }
-    return new PgVector({
+    const { PgVector: PgVectorImpl } = await import("@mastra/pg");
+    return new PgVectorImpl({
       id: "memorease",
       connectionString: config.connectionString,
-    });
+    }) as unknown as PgVector;
   }
   // libsql path: ensure the parent directory exists (data dir may not yet).
   const url = config.libsqlUrl;
   if (!url) throw new Error("libsql backend selected but no url was resolved");
   // Best-effort: create the parent dir for file: URLs (no-op for :memory:).
   // SYNC mkdir (not `void mkdir` from fs/promises) closes the parent-dir race
-  // that used to underpin the M2 sync-throw path: the dir is guaranteed to
-  // exist before `new LibSQLVector()` reads it. Swallowed because libsql will
-  // fail loudly on init if the dir is still unreachable (e.g. EACCES).
+  // that used to underpin the M2 throw path: the dir is guaranteed to exist
+  // before `new LibSQLVector()` reads it. Swallowed because libsql will fail
+  // loudly on init if the dir is still unreachable (e.g. EACCES).
   if (url.startsWith("file:") && !url.includes(":memory:")) {
     const fsPath = url.slice("file:".length);
     try {
@@ -57,7 +65,8 @@ export function createVectorStore(
       /* swallowed — see comment above */
     }
   }
-  return new LibSQLVector({ id: "memorease", url });
+  const { LibSQLVector: LibSQLVectorImpl } = await import("@mastra/libsql");
+  return new LibSQLVectorImpl({ id: "memorease", url }) as unknown as LibSQLVector;
 }
 
 /**

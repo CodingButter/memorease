@@ -11,6 +11,7 @@ import {
   ensureSchema,
   INDEX_NAME,
 } from "../src/store.js";
+import type { MastraVector } from "@mastra/core/vector";
 import { writeMemory } from "../src/memory.js";
 import { _resetForTests as resetConfig } from "../src/config.js";
 
@@ -57,14 +58,14 @@ function execOf(entry: { tool?: { execute?: ExecFn | any } }): ExecFn {
 
 let tmpDir: string;
 let skillsDir: string;
-let store: ReturnType<typeof createVectorStore>;
+let store: MastraVector;
 
-beforeAll(() => {
+beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "memorease-tools-"));
   skillsDir = join(tmpDir, "skills");
   const libsqlPath = `file:${join(tmpDir, "memorease-tools.db")}`;
   process.env.MEMOREASE_LIBSQL_PATH = libsqlPath;
-  store = createVectorStore({ backend: "libsql", libsqlUrl: libsqlPath });
+  store = await createVectorStore({ backend: "libsql", libsqlUrl: libsqlPath });
 });
 
 afterAll(() => {
@@ -290,7 +291,7 @@ describe("tools: libsql backend", () => {
 
 describe.skipIf(!PG_CONNECTION)("tools: pg backend", () => {
   beforeEach(async () => {
-    const pgStore = createVectorStore({
+    const pgStore = await createVectorStore({
       backend: "pg",
       connectionString: PG_CONNECTION!,
     });

@@ -26,6 +26,9 @@ import { SignalProvider } from "@mastra/core/signals";
 import type { MastraVector } from "@mastra/core/vector";
 import { embed } from "./embed.ts";
 import { INDEX_NAME } from "./store.ts";
+import { curateForBoot, INJECT_BUDGET_DEFAULT } from "./curator.ts";
+import { buildBootQuery, buildSessionContext } from "./instructions.ts";
+import type { MemoryHit } from "./memory.ts";
 
 export type TapStatus =
   | "armed"
@@ -84,12 +87,22 @@ export type ProbeState = {
   /** Reason the provider is currently disarmed, if any. */
   disarmedReason?: Exclude<TapStatus, "armed">;
   notifiedCount: number;
+  /**
+   * Threads whose one-shot boot curation has reached a terminal outcome
+   * (notified, empty store, curator fallback). Threads with transient
+   * failures (no recallable text yet, error) are NOT added, so the next poll
+   * retries — cheap, since the LLM only runs after recall+query succeed.
+   */
+  bootCuratedThreads: Set<string>;
+  bootCuratedCount: number;
 };
 
 export function newProbeState(): ProbeState {
   return {
     lastNotifiedPerThread: new Map(),
     notifiedCount: 0,
+    bootCuratedThreads: new Set(),
+    bootCuratedCount: 0,
   };
 }
 
@@ -145,6 +158,20 @@ export function hintBody(hit: {
   return (
     `memorease: you may have a relevant memory named '${hit.name}' ` +
     `(score ${hit.score.toFixed(2)}). Consider calling memory_query to recall it.`
+  );
+}
+
+/**
+ * Format the boot-curation body. Same principle as `hintBody`: names only,
+ * never memory content — the agent stays in the loop and recalls via
+ * `memory_query`.
+ */
+export function bootCurationBody(names: string[]): string {
+  const list = names.map((n) => `'${n}'`).join(", ");
+  return (
+    `memorease boot curation: given the current conversation, your most ` +
+    `relevant stored memories are: ${list}. Call memory_query to recall any ` +
+    `you haven't already.`
   );
 }
 
@@ -217,6 +244,100 @@ export async function probeSubscriber(
   }
 }
 
+/** Test seam: matches `curateForBoot`'s signature. */
+type CurateFn = typeof curateForBoot;
+
+/**
+ * One-shot boot curation for a single thread. This is where the curator LLM
+ * actually runs — moved off the boot path (`instructions()` injects
+ * similarity-ranked hits without an LLM call) so session start stays fast.
+ * Running here has a second advantage: the curator sees the live
+ * conversation, not boot-time guesswork.
+ *
+ * Flow: recall recent user text → broad boot query for candidates → curator
+ * LLM pass → notify with the picked memory NAMES (never content). Terminal
+ * outcomes (notified, empty store, curator fallback) mark the thread done in
+ * `state.bootCuratedThreads`; transient ones (no text yet, error) leave it
+ * unmarked so the next poll retries.
+ *
+ * Never throws — mirrors `probeSubscriber`'s fail-soft contract.
+ */
+export async function bootCurateSubscriber(
+  getAgent: AgentGetter,
+  store: MastraVector,
+  embedFn: (text: string) => Promise<number[]>,
+  sub: SubLike,
+  state: ProbeState,
+  notify: (body: string, sub: SubLike) => Promise<void>,
+  opts: { modelId: string; budget: number; curateFn?: CurateFn },
+): Promise<
+  | "notified"
+  | "skipped-already-curated"
+  | "skipped-no-text"
+  | "skipped-empty-store"
+  | "skipped-curator-fallback"
+  | "disarmed-no-memory"
+  | "error"
+> {
+  if (state.bootCuratedThreads.has(sub.threadId)) {
+    return "skipped-already-curated";
+  }
+  try {
+    const agent = getAgent();
+    if (!agent?.memory || typeof agent.memory.recall !== "function") {
+      return "disarmed-no-memory";
+    }
+    const recalled = await agent.memory.recall({
+      threadId: sub.threadId,
+      resourceId: sub.resourceId,
+      perPage: RECALL_PER_PAGE,
+    });
+    const recent = extractRecentUserText(recalled?.messages);
+    if (!recent) return "skipped-no-text";
+
+    const vector = await embedFn(buildBootQuery());
+    const rows = await store.query({
+      indexName: INDEX_NAME,
+      queryVector: vector,
+      topK: Math.ceil(opts.budget / 200),
+    });
+    const candidates: MemoryHit[] = rows.map((r) => ({
+      id: r.id,
+      score: r.score,
+      name: String(r.metadata?.name ?? ""),
+      content: String(r.metadata?.content ?? ""),
+      type: typeof r.metadata?.type === "string" ? r.metadata.type : undefined,
+    }));
+    if (candidates.length === 0) {
+      state.bootCuratedThreads.add(sub.threadId);
+      return "skipped-empty-store";
+    }
+
+    const sessionContext = `${buildSessionContext()}; recent conversation: ${recent.slice(0, 400)}`;
+    const curate = await (opts.curateFn ?? curateForBoot)(
+      opts.modelId,
+      candidates,
+      opts.budget,
+      sessionContext,
+    );
+    if (!curate.usedCurator || curate.hits.length === 0) {
+      // Curator fell back to similarity — that's exactly what boot already
+      // injected, so a notification would be pure noise. Terminal: don't
+      // re-spend the roundtrip next poll.
+      state.bootCuratedThreads.add(sub.threadId);
+      return "skipped-curator-fallback";
+    }
+
+    await notify(bootCurationBody(curate.hits.map((h) => h.name)), sub);
+    state.bootCuratedThreads.add(sub.threadId);
+    state.bootCuratedCount += 1;
+    return "notified";
+  } catch (err) {
+    state.lastError = err instanceof Error ? err.message : String(err);
+    return "error";
+  }
+}
+
 export type ProviderStatus = {
   armed: boolean;
   disarmedReason?: Exclude<TapStatus, "armed">;
@@ -224,6 +345,7 @@ export type ProviderStatus = {
   lastError?: string;
   subscriptionCount: number;
   notifiedCount: number;
+  bootCuratedCount: number;
 };
 
 type CreateProviderOpts = {
@@ -231,6 +353,13 @@ type CreateProviderOpts = {
   /** Override the embedder (tests). Defaults to the module-level `embed`. */
   embedFn?: (text: string) => Promise<number[]>;
   pollIntervalMs?: number;
+  /**
+   * Curator model id for the background boot-curation signal. Undefined =
+   * curator disarmed — boot curation never runs, gut-feeling taps still do.
+   */
+  curatorModelId?: string;
+  /** Character budget for the curated selection. Defaults to the boot budget default. */
+  injectBudget?: number;
 };
 
 /**
@@ -247,10 +376,13 @@ export function createMemoreaseProvider({
   store,
   embedFn,
   pollIntervalMs,
+  curatorModelId,
+  injectBudget,
 }: CreateProviderOpts): unknown {
   const embedImpl = embedFn ?? embed;
   const state = newProbeState();
   const pollInterval = pollIntervalMs ?? DEFAULT_POLL_MS;
+  const budget = injectBudget ?? INJECT_BUDGET_DEFAULT;
 
   class MemoreaseSignalProvider extends SignalProvider {
     readonly id = "memorease-gut-feeling" as const;
@@ -268,30 +400,50 @@ export function createMemoreaseProvider({
       return a;
     }
 
+    // `notify` is protected on the base class; the subclass calls it.
+    // Cast through unknown to satisfy the loose base type.
+    private async sendSignal(
+      kind: string,
+      body: string,
+      target: SubLike,
+    ): Promise<void> {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const self = this as any;
+      await self.notify(
+        {
+          source: "memorease",
+          kind,
+          summary: body,
+          priority: "low",
+        },
+        { threadId: target.threadId, resourceId: target.resourceId },
+      );
+    }
+
     async poll(subscriptions: Array<SubLike>): Promise<void> {
       state.lastPollAt = Date.now();
       for (const sub of subscriptions) {
+        // One-shot boot curation first (armed curator only) — this is the
+        // curator LLM pass that used to block instructions() at session
+        // start, now delivered as a background signal.
+        if (curatorModelId) {
+          await bootCurateSubscriber(
+            () => this.getAgent(),
+            store,
+            embedImpl,
+            sub,
+            state,
+            (body, target) => this.sendSignal("boot-curation", body, target),
+            { modelId: curatorModelId, budget },
+          );
+        }
         await probeSubscriber(
           () => this.getAgent(),
           store,
           embedImpl,
           sub,
           state,
-          async (body, target) => {
-            // `notify` is protected on the base class; the subclass calls it.
-            // Cast through unknown to satisfy the loose base type.
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const self = this as any;
-            await self.notify(
-              {
-                source: "memorease",
-                kind: "gut-feeling",
-                summary: body,
-                priority: "low",
-              },
-              { threadId: target.threadId, resourceId: target.resourceId },
-            );
-          },
+          (body, target) => this.sendSignal("gut-feeling", body, target),
         );
       }
     }
@@ -307,6 +459,7 @@ export function createMemoreaseProvider({
         lastError: state.lastError,
         subscriptionCount: subCount ?? 0,
         notifiedCount: state.notifiedCount,
+        bootCuratedCount: state.bootCuratedCount,
       };
     }
   }

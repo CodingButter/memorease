@@ -25,12 +25,12 @@ import {
   createVectorStore,
   ensureSchema,
 } from "./store.ts";
+import type { MastraVector } from "@mastra/core/vector";
 import { queryMemories, type MemoryHit } from "./memory.ts";
 import {
-  curateForBoot,
   curatorPreflightError,
+  rankAndTruncate,
   renderHit,
-  resolveCuratorModel,
   resolveInjectBudget,
 } from "./curator.ts";
 import { failSoft, type StorageResult } from "./errors.ts";
@@ -73,8 +73,11 @@ function bootTimeoutMs(): number {
  * Build the short context string shown to the curator to help it judge
  * relevance. Stays cheap — `git rev-parse` is avoided (not worth a subprocess
  * at boot); cwd basename + hostname is enough signal.
+ *
+ * Exported for the background curation signal (provider.ts), which appends
+ * live conversation text to it before calling the curator.
  */
-function buildSessionContext(): string {
+export function buildSessionContext(): string {
   const host = hostname();
   const cwd = basename(process.cwd());
   return `host=${host}; cwd=${cwd}`;
@@ -91,8 +94,11 @@ function buildSessionContext(): string {
  * Hostname and cwd-basename hints are folded in so that memories referencing
  * them (project context, machine profile facts) get a slight boost, without
  * excluding memories that don't.
+ *
+ * Exported for the background curation signal (provider.ts), which re-runs
+ * the same broad query to gather candidates for the curator LLM.
  */
-function buildBootQuery(): string {
+export function buildBootQuery(): string {
   const host = hostname();
   const cwd = basename(process.cwd());
   return `memories about the user, their preferences, habits, current project ${cwd}, host ${host}, environment, past sessions, and any other durable context`;
@@ -140,7 +146,7 @@ function curatorNote(config: {
  */
 function renderMemoriesSection(
   hits: MemoryHit[],
-  extras: { curatorNote?: string; fallbackNote?: string },
+  extras: { curatorNote?: string },
 ): string {
   const lines: string[] = ["## Memories", ""];
   for (const hit of hits) {
@@ -150,7 +156,6 @@ function renderMemoriesSection(
   lines.push(
     "Query memory before assuming prior context — names above are hints, not promises.",
   );
-  if (extras.fallbackNote) lines.push("", extras.fallbackNote);
   if (extras.curatorNote) lines.push("", extras.curatorNote);
   return lines.join("\n");
 }
@@ -174,7 +179,7 @@ function renderStorageUnreachableSection(detail: string): string {
  * with the real cause, rather than being discarded as an "unexpected bug".
  */
 async function ensureSchemaOrFailSoft(
-  store: ReturnType<typeof createVectorStore>,
+  store: MastraVector,
 ): Promise<StorageResult<void>> {
   return failSoft(async () => {
     await ensureSchema(store);
@@ -188,7 +193,9 @@ async function ensureSchemaOrFailSoft(
  *   1. Resolve storage config + open the store.
  *   2. Race the boot query (ensureSchema + queryMemories) against a timeout.
  *   3. On branded failure or timeout → return the storage-unreachable section.
- *   4. On success → curate (if armed) or rank-and-truncate, then render.
+ *   4. On success → rank-and-truncate by similarity, then render. The curator
+ *      LLM never runs here — it fires later as a background signal
+ *      (provider.ts `bootCurateSubscriber`).
  *
  * Never throws. Never returns a rejected promise. The return is always a
  * string (possibly empty if everything succeeded but no memories were found
@@ -210,7 +217,9 @@ export type BuildInstructionsOptions = {
  *   1. Resolve storage config + open the store.
  *   2. Race the boot query (ensureSchema + queryMemories) against a timeout.
  *   3. On branded failure or timeout → return the storage-unreachable section.
- *   4. On success → curate (if armed) or rank-and-truncate, then render.
+ *   4. On success → rank-and-truncate by similarity, then render. The curator
+ *      LLM never runs here — it fires later as a background signal
+ *      (provider.ts `bootCurateSubscriber`).
  *
  * Never throws. Never returns a rejected promise. The return is always a
  * string (possibly empty if everything succeeded but no memories were found
@@ -227,10 +236,10 @@ export async function buildInstructions(
   // branded storage-unreachable section, not a rejected instructions() promise.
   // The plugin contract is "never throws, never rejects" (JSDoc above).
   const storeFactory = opts._createVectorStoreForTests ?? createVectorStore;
-  let store: ReturnType<typeof createVectorStore> | undefined;
+  let store: MastraVector | undefined;
   try {
     const resolved = resolveConfig(context);
-    store = storeFactory(resolved);
+    store = await storeFactory(resolved);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return renderStorageUnreachableSection(
@@ -238,7 +247,6 @@ export async function buildInstructions(
     );
   }
 
-  const modelId = resolveCuratorModel(context.config ?? {});
   const budget = resolveInjectBudget(
     (context.config as { injectBudget?: string } | undefined)?.injectBudget,
   );
@@ -287,15 +295,14 @@ export async function buildInstructions(
       : MEMOREASE_DIRECTIVE;
   }
 
-  const curate = await curateForBoot(
-    modelId,
-    candidates,
-    budget,
-    buildSessionContext(),
-  );
+  // Similarity ranking only — the curator LLM never runs at boot (it costs a
+  // multi-second model roundtrip that would block every session start). When
+  // a curator model is armed, the curated selection arrives later as a
+  // background signal (see provider.ts `bootCurateSubscriber`), where it can
+  // also consider the live conversation.
+  const hits = rankAndTruncate(candidates, budget);
 
-  return `${MEMOREASE_DIRECTIVE}\n\n${renderMemoriesSection(curate.hits, {
-    curatorNote: curate.usedCurator ? undefined : curatorNote(context.config ?? {}),
-    fallbackNote: curate.fallbackNote,
+  return `${MEMOREASE_DIRECTIVE}\n\n${renderMemoriesSection(hits, {
+    curatorNote: curatorNote(context.config ?? {}),
   })}`;
 }

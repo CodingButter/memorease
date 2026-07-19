@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   probeSubscriber,
+  bootCurateSubscriber,
+  bootCurationBody,
   newProbeState,
   extractText,
   extractRecentUserText,
@@ -73,7 +75,7 @@ function makeAgent(opts: {
   return agent;
 }
 
-type MockHit = { score: number; metadata?: { name?: string } };
+type MockHit = { score: number; metadata?: { name?: string; content?: string } };
 
 function makeMockStore(hits: MockHit[]) {
   return {
@@ -359,6 +361,197 @@ describe("provider: probeSubscriber", () => {
 
     expect(result).toBe("error");
     expect(state.lastError).toContain("onnx load failed");
+  });
+});
+
+// --- bootCurateSubscriber: background curation signal ---------------------
+
+describe("provider: bootCurateSubscriber", () => {
+  let state: ProbeState;
+  let notifyCalls: Array<{ body: string; sub: typeof SUB }>;
+
+  const OPTS_BASE = { modelId: "test/model", budget: 1200 };
+
+  function chattyAgent() {
+    return makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "working on the memorease plugin" }],
+      }),
+    });
+  }
+
+  function stubCurate(hits: Array<{ name: string; content?: string }>, usedCurator: boolean) {
+    return async () => ({
+      hits: hits.map((h, i) => ({
+        id: String(i),
+        score: 0.9 - i * 0.1,
+        name: h.name,
+        content: h.content ?? "",
+      })),
+      usedCurator,
+    });
+  }
+
+  beforeEach(() => {
+    state = newProbeState();
+    notifyCalls = [];
+  });
+
+  const notify = async (body: string, sub: typeof SUB) => {
+    notifyCalls.push({ body, sub });
+  };
+
+  it("notifies with curated memory names (never content) and marks the thread done", async () => {
+    const store = makeMockStore([
+      { score: 0.8, metadata: { name: "voice-first", content: "SECRET CONTENT" } },
+    ]);
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "voice-first", content: "SECRET CONTENT" }], true) },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].body).toContain("voice-first");
+    expect(notifyCalls[0].body).toContain("memory_query");
+    expect(notifyCalls[0].body).not.toContain("SECRET CONTENT");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+    expect(state.bootCuratedCount).toBe(1);
+  });
+
+  it("is one-shot per thread — second call skips without touching the curator", async () => {
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+    let curateCalls = 0;
+    const countingCurate = async () => {
+      curateCalls++;
+      return {
+        hits: [{ id: "0", score: 0.9, name: "m", content: "" }],
+        usedCurator: true,
+      };
+    };
+
+    const r1 = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: countingCurate },
+    );
+    const r2 = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: countingCurate },
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("skipped-already-curated");
+    expect(curateCalls).toBe(1);
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("suppresses the signal on curator fallback (similarity = what boot already injected)", async () => {
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "m" }], false) },
+    );
+
+    expect(result).toBe("skipped-curator-fallback");
+    expect(notifyCalls).toHaveLength(0);
+    // Terminal — don't re-spend the LLM roundtrip next poll.
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+  });
+
+  it("retries later when recall has no usable text yet (not terminal)", async () => {
+    const agent = makeAgent({ recallImpl: async () => ({ messages: [] }) });
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+
+    const result = await bootCurateSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "m" }], true) },
+    );
+
+    expect(result).toBe("skipped-no-text");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(false);
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("marks done on empty store without calling the curator", async () => {
+    const store = makeMockStore([]);
+    let curateCalls = 0;
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      {
+        ...OPTS_BASE,
+        curateFn: async () => {
+          curateCalls++;
+          return { hits: [], usedCurator: false };
+        },
+      },
+    );
+
+    expect(result).toBe("skipped-empty-store");
+    expect(curateCalls).toBe(0);
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+  });
+
+  it("swallows throws and records lastError (not terminal)", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => {
+        throw new Error("recall exploded");
+      },
+    });
+    const store = makeMockStore([]);
+
+    const result = await bootCurateSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      OPTS_BASE,
+    );
+
+    expect(result).toBe("error");
+    expect(state.lastError).toContain("recall exploded");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(false);
+  });
+
+  it("bootCurationBody lists names and points at memory_query", () => {
+    const body = bootCurationBody(["a-memory", "b-memory"]);
+    expect(body).toContain("'a-memory'");
+    expect(body).toContain("'b-memory'");
+    expect(body).toContain("memory_query");
   });
 });
 

@@ -72,7 +72,7 @@ export function resolveCuratorModel(config: CuratorConfig): string | undefined {
 export function curatorPreflightError(config: CuratorConfig): string | undefined {
   const modelId = resolveCuratorModel(config);
   if (modelId) return undefined;
-  return "memorease: curator disarmed — no curator model selected and no mastracode observer model found in settings.json. Fix: /plugins → Memorease → curatorModel → pick a model, or set models.observerModelOverride in mastracode. Memory will still be injected using similarity ranking only.";
+  return "memorease: curator disarmed — no curator model selected and no mastracode observer model found in settings.json. Fix: /plugins → Memorease → curatorModel → pick a model, or set models.observerModelOverride in mastracode. Boot injection uses similarity ranking either way; without a curator model the background curation signal will not run.";
 }
 
 /**
@@ -287,9 +287,11 @@ export async function curateForBoot(
 
 /**
  * Sort candidates by descending vector score, then truncate to `budget`
- * characters of rendered content (see `renderHit`).
+ * characters of rendered content (see `renderHit`). Exported because the boot
+ * path uses this directly — the curator LLM never runs at boot; it fires later
+ * as a background signal (see provider.ts `bootCurateSubscriber`).
  */
-function rankAndTruncate(candidates: MemoryHit[], budget: number): MemoryHit[] {
+export function rankAndTruncate(candidates: MemoryHit[], budget: number): MemoryHit[] {
   const sorted = [...candidates].sort((a, b) => b.score - a.score);
   return truncate(sorted, budget);
 }

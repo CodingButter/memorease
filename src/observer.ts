@@ -119,6 +119,10 @@ export async function armProvider(args: {
   store: MastraVector;
   embedFn?: (text: string) => Promise<number[]>;
   pollIntervalMs?: number;
+  /** Curator model id for the background boot-curation signal (optional). */
+  curatorModelId?: string;
+  /** Character budget for the curated selection (optional). */
+  injectBudget?: number;
 }): Promise<ArmResult> {
   if (armingPromise) {
     await armingPromise;
@@ -130,7 +134,7 @@ export async function armProvider(args: {
     return { ...armed.result, freshlyArmed: false };
   }
   armingPromise = (async () => {
-    const { toolCtx, store, embedFn, pollIntervalMs } = args;
+    const { toolCtx, store, embedFn, pollIntervalMs, curatorModelId, injectBudget } = args;
     if (!toolCtx?.mastra) {
       const result: ArmResult = {
         status: "disarmed-no-agent",
@@ -153,6 +157,8 @@ export async function armProvider(args: {
         store,
         embedFn: embedFn ?? embed,
         pollIntervalMs,
+        curatorModelId,
+        injectBudget,
       });
       // The provider's base class exposes `connect(agent)` and
       // `startPolling()` as public methods. Cast through unknown to satisfy

@@ -43,9 +43,9 @@ describe("memory ops: libsql backend", () => {
   let tmpDir: string;
   let store: MastraVector;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "memorease-mem-libsql-"));
-    store = createVectorStore(makeLibsqlConfig(tmpDir));
+    store = await createVectorStore(makeLibsqlConfig(tmpDir));
   });
 
   afterAll(() => {
@@ -185,8 +185,8 @@ describe.skipIf(!PG_CONNECTION)(
   () => {
     let store: MastraVector;
 
-    beforeAll(() => {
-      store = createVectorStore({
+    beforeAll(async () => {
+      store = await createVectorStore({
         backend: "pg",
         connectionString: PG_CONNECTION!,
       });

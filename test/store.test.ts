@@ -25,9 +25,9 @@ describe("store: libsql backend (real LibSQLVector)", () => {
   let tmpDir: string;
   let store: MastraVector;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "memorease-libsql-"));
-    store = createVectorStore(makeLibsqlConfig(tmpDir));
+    store = await createVectorStore(makeLibsqlConfig(tmpDir));
   });
 
   afterAll(() => {
@@ -82,12 +82,12 @@ describe.skipIf(!PG_CONNECTION)(
   () => {
     let store: MastraVector;
 
-    beforeAll(() => {
+    beforeAll(async () => {
       const config: ResolvedConfig = {
         backend: "pg",
         connectionString: PG_CONNECTION!,
       };
-      store = createVectorStore(config);
+      store = await createVectorStore(config);
     });
 
     it("ensureSchema creates the index with dimension 384 and cosine metric", async () => {

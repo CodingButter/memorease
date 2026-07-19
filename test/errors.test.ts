@@ -31,8 +31,8 @@ describe("fail-soft: unreachable pg (bogus connection string)", () => {
   // and the failure surfaces at op time — exactly what fail-soft catches.
   let store: MastraVector;
 
-  beforeAll(() => {
-    store = createVectorStore({
+  beforeAll(async () => {
+    store = await createVectorStore({
       backend: "pg",
       connectionString: "postgresql://u:p@127.0.0.1:1/none",
     });
@@ -71,7 +71,7 @@ describe("fail-soft: embedder/ONNX failure (R4)", () => {
 
   beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "memorease-embed-fail-"));
-    store = createVectorStore({
+    store = await createVectorStore({
       backend: "libsql",
       libsqlUrl: `file:${join(tmpDir, "test.db")}`,
     });

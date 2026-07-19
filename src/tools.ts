@@ -31,6 +31,7 @@ import {
   writeMemory,
 } from "./memory.ts";
 import { armProvider, tapStatus, type ToolCtxLike } from "./observer.ts";
+import { resolveCuratorModel, resolveInjectBudget } from "./curator.ts";
 
 /**
  * Lazily-resolved store handle. The first tool call pays the ONNX warm-up and
@@ -62,6 +63,22 @@ function configFingerprint(ctx: PluginContext): string {
 }
 
 /**
+ * Curator wiring for `armProvider` — the background boot-curation signal
+ * needs the resolved curator model id and inject budget, since the curator
+ * LLM no longer runs on the boot instructions path.
+ */
+function curatorArgs(ctx: PluginContext): {
+  curatorModelId?: string;
+  injectBudget: number;
+} {
+  const config = (ctx.config ?? {}) as { curatorModel?: string; injectBudget?: string };
+  return {
+    curatorModelId: resolveCuratorModel(config),
+    injectBudget: resolveInjectBudget(config.injectBudget),
+  };
+}
+
+/**
  * Resolve (and cache) the vector store. The first call per config fingerprint
  * also fires `armProvider(toolCtx, store)` — this is where the gut-feeling
  * signal provider gets connected to the live agent. Arming is memoized inside
@@ -82,7 +99,9 @@ async function getStore(
     // and we somehow haven't armed yet (e.g. first call after a cache hit
     // from instructions). Memoized inside armProvider — cheap.
     if (toolCtx) {
-      void armProvider({ toolCtx, store: cached.store }).catch(() => {});
+      void armProvider({ toolCtx, store: cached.store, ...curatorArgs(context) }).catch(
+        () => {},
+      );
     }
     return cached;
   }
@@ -96,7 +115,7 @@ async function getStore(
   const resolved = resolveConfig(context);
   let store: MastraVector;
   try {
-    store = createVectorStore(resolved);
+    store = await createVectorStore(resolved);
     await ensureSchema(store);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -110,7 +129,7 @@ async function getStore(
   if (toolCtx) {
     // Fire-and-forget — arming failures must not break the tool call. The
     // deliberate-memory core works without the provider.
-    void armProvider({ toolCtx, store }).catch(() => {});
+    void armProvider({ toolCtx, store, ...curatorArgs(context) }).catch(() => {});
   }
   return handle;
 }

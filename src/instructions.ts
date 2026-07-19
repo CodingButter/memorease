@@ -168,17 +168,43 @@ async function ensureSchemaOrFailSoft(
  * string (possibly empty if everything succeeded but no memories were found
  * AND no curator note is warranted).
  */
-export async function buildInstructions(context: PluginContext): Promise<string> {
+export type BuildInstructionsOptions = {
+  /**
+   * Test-only seam. Override the store factory to deterministically exercise
+   * the sync-throw wrapping in `buildInstructions` (M2 regression). Production
+   * callers omit this and the real `createVectorStore` is used.
+   */
+  _createVectorStoreForTests?: typeof createVectorStore;
+};
+
+/**
+ * Boot memory injection. The plugin's `instructions(context)` delegates here.
+ *
+ * Flow:
+ *   1. Resolve storage config + open the store.
+ *   2. Race the boot query (ensureSchema + queryMemories) against a timeout.
+ *   3. On branded failure or timeout → return the storage-unreachable section.
+ *   4. On success → curate (if armed) or rank-and-truncate, then render.
+ *
+ * Never throws. Never returns a rejected promise. The return is always a
+ * string (possibly empty if everything succeeded but no memories were found
+ * AND no curator note is warranted).
+ */
+export async function buildInstructions(
+  context: PluginContext,
+  opts: BuildInstructionsOptions = {},
+): Promise<string> {
   // Resolve config + open the store OUTSIDE the fail-soft net of queryMemories,
   // but inside our own: a sync throw from createVectorStore (e.g. libsql
   // parent-dir race on a fresh system) or a reject from ensureSchema (pg
   // CREATE INDEX permission failure, connection refused) must surface as a
   // branded storage-unreachable section, not a rejected instructions() promise.
   // The plugin contract is "never throws, never rejects" (JSDoc above).
+  const storeFactory = opts._createVectorStoreForTests ?? createVectorStore;
   let store: ReturnType<typeof createVectorStore> | undefined;
   try {
     const resolved = resolveConfig(context);
-    store = createVectorStore(resolved);
+    store = storeFactory(resolved);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return renderStorageUnreachableSection(

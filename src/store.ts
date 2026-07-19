@@ -1,7 +1,7 @@
 import { PgVector } from "@mastra/pg";
 import { LibSQLVector } from "@mastra/libsql";
 import type { MastraVector } from "@mastra/core/vector";
-import { mkdir } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { ResolvedConfig } from "./config.js";
@@ -45,11 +45,17 @@ export function createVectorStore(
   const url = config.libsqlUrl;
   if (!url) throw new Error("libsql backend selected but no url was resolved");
   // Best-effort: create the parent dir for file: URLs (no-op for :memory:).
+  // SYNC mkdir (not `void mkdir` from fs/promises) closes the parent-dir race
+  // that used to underpin the M2 sync-throw path: the dir is guaranteed to
+  // exist before `new LibSQLVector()` reads it. Swallowed because libsql will
+  // fail loudly on init if the dir is still unreachable (e.g. EACCES).
   if (url.startsWith("file:") && !url.includes(":memory:")) {
     const fsPath = url.slice("file:".length);
-    void mkdir(dirname(fsPath), { recursive: true }).catch(() => {
-      /* swallowed — libsql will fail loudly on init if the dir is unreachable */
-    });
+    try {
+      mkdirSync(dirname(fsPath), { recursive: true });
+    } catch {
+      /* swallowed — see comment above */
+    }
   }
   return new LibSQLVector({ id: "memorease", url });
 }

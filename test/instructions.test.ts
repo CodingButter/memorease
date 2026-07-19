@@ -222,29 +222,40 @@ describe("instructions: buildInstructions never throws", () => {
     process.env.MEMOREASE_SETTINGS_PATH = makeEmptySettings();
   });
 
-  it("returns a branded section when createVectorStore throws (bad pg config)", async () => {
-    // A pg backend with no resolvable connection string makes createVectorStore
-    // throw inside resolveConfig→createVectorStore. buildInstructions must
-    // catch and return a branded section, not reject.
-    // We force this by asking for pg without a usable connection — the store
-    // factory throws "pg backend selected but no connection string".
-    // Achieve this by pointing explicit connectionString at empty after
-    // resolveConfig memoization is reset.
+  it("returns a branded section when createVectorStore throws synchronously (M2)", async () => {
+    // Deterministic M2 test: inject a factory that throws synchronously to
+    // prove the buildInstructions wrapping catches it. The prior version of
+    // this test pointed at a malformed pg URL, but resolveConfig returned it
+    // as a usable connectionString — so the test was actually exercising the
+    // M3 ensureSchema fail-soft path, not M2. This version deletes the M2
+    // try/catch's effectiveness if removed: the injected factory throws
+    // unconditionally, so only the M2 catch can produce a branded section.
+    resetConfig();
+    const section = await buildInstructions(
+      { config: { connectionString: undefined, curatorModel: undefined } },
+      {
+        _createVectorStoreForTests: () => {
+          throw new Error("forced sync throw from createVectorStore");
+        },
+      },
+    );
+    expect(section).toMatch(/Storage unreachable/);
+    expect(section).toContain("forced sync throw from createVectorStore");
+  });
+
+  it("returns a branded section when pg connectionString points at an unreachable port (integration smoke)", async () => {
+    // Integration check: end-to-end, a pg config that fails at connect time
+    // surfaces as a branded section rather than a rejected promise. This
+    // overlaps with M3 (ensureSchema fail-soft) but confirms the wrapping
+    // composes correctly with the real PgVector error path.
     resetConfig();
     const section = await buildInstructions({
-      // An explicitly-empty connectionString falls through to settings; with
-      // MEMOREASE_SETTINGS_PATH pointing at an empty settings.json, resolveConfig
-      // lands on libsql — which succeeds. To exercise the throw, we instead
-      // pass a syntactically-broken connection that PgVector rejects at build.
       config: {
-        connectionString: "not-a-valid-postgres-url",
+        connectionString: "postgresql://x:x@127.0.0.1:9/memorease",
         curatorModel: undefined,
       },
     });
     expect(typeof section).toBe("string");
-    // Either it branded a storage failure or (if PgVector happened to defer
-    // the error to connect time) it surfaced the unreachable section. Both
-    // are acceptable — the contract is "no throw".
-    expect(section.length).toBeGreaterThan(0);
+    expect(section).toMatch(/Storage unreachable/);
   });
 });

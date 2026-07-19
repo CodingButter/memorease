@@ -4,6 +4,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import { buildTools, _resetStoreForTests } from "../src/tools.js";
+import * as toolsNS from "../src/tools.js";
 import type { MastraCodePluginContext } from "mastracode/plugin";
 import {
   createVectorStore,
@@ -249,6 +250,41 @@ describe("tools: libsql backend", () => {
     );
     expect(d.ok).toBe(false);
     expect(d.error as string).toMatch(/memorease:/);
+  });
+
+  it("getStore negative-caches a failed fingerprint: second call short-circuits ensureSchema (R2)", async () => {
+    // Deterministic behavioral test for the negative cache. The cache is
+    // module-level state in tools.ts; _negativeCacheHitsForTests counts how
+    // many calls hit the cache (and therefore skipped ensureSchema). Without
+    // the cache, every call re-enters getStore and stalls for the connection
+    // timeout — which is the exact UX bug R2 was about.
+    //
+    // Note: the `beforeEach` calls `_resetStoreForTests()` which zeroes the
+    // counter; this test then makes two consecutive calls WITHOUT a reset
+    // between them, and asserts the second one hit the cache.
+    const ctx = makeContext({
+      connectionString: "postgresql://memorease:bad@127.0.0.1:9/memorease",
+    });
+    const tools = buildTools(ctx);
+
+    expect(toolsNS._negativeCacheHitsForTests).toBe(0);
+
+    const q1 = await execOf(tools.memory_query)({ text: "anything" }, {});
+    expect(q1.ok).toBe(false);
+    expect(q1.error as string).toMatch(/memorease:/);
+    // First call populated the cache but did not HIT it (it recorded the error).
+    expect(toolsNS._negativeCacheHitsForTests).toBe(0);
+
+    const q2 = await execOf(tools.memory_query)({ text: "anything" }, {});
+    expect(q2.ok).toBe(false);
+    expect(q2.error as string).toMatch(/memorease:/);
+    // Second call against the same fingerprint must short-circuit — no second
+    // ensureSchema attempt, no second ECONNREFUSED wait.
+    expect(toolsNS._negativeCacheHitsForTests).toBe(1);
+
+    const q3 = await execOf(tools.memory_query)({ text: "anything" }, {});
+    expect(q3.ok).toBe(false);
+    expect(toolsNS._negativeCacheHitsForTests).toBe(2);
   });
 });
 

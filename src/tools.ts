@@ -49,6 +49,10 @@ let handleConfigFingerprint: string | undefined;
 // The negative entry is cleared by _resetStoreForTests and on any successful
 // resolution after a config change.
 let handleError: { fingerprint: string; error: string } | undefined;
+// Test-only: counts how many calls hit the negative cache (i.e. were
+// short-circuited without re-attempting ensureSchema). Lets the behavioral
+// test prove the cache works without timing or spying across ESM bindings.
+export let _negativeCacheHitsForTests = 0;
 
 function configFingerprint(ctx: PluginContext): string {
   const r = resolveConfig(ctx);
@@ -86,6 +90,7 @@ async function getStore(
   // bootstrap. Return the same branded error immediately — do NOT re-attempt
   // (which would stall the agent for the connection timeout on every call).
   if (handleError && handleError.fingerprint === fp) {
+    _negativeCacheHitsForTests++;
     throw new Error(handleError.error);
   }
   const resolved = resolveConfig(context);
@@ -119,6 +124,7 @@ export function _resetStoreForTests(): void {
   handle = undefined;
   handleConfigFingerprint = undefined;
   handleError = undefined;
+  _negativeCacheHitsForTests = 0;
 }
 
 /**

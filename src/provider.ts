@@ -183,14 +183,22 @@ export function extractRecentUserText(
   return extractText(messages[messages.length - 1]);
 }
 
-/** Format the nudge body shown to the agent. Never pastes memory content. */
-export function hintBody(hit: {
-  name: string;
-  score: number;
-}): string {
+/**
+ * Format the nudge body shown to the agent. Never pastes memory content, and
+ * deliberately does NOT present itself as "the memory" — a gut feeling is a
+ * door, not a document. Naming a single memory as the payload would invite a
+ * one-shot lookup; instead the hint says the current moment resonates with
+ * stored knowledge and offers the hit names as *starting points* for a
+ * broader memory_query dive.
+ */
+export function hintBody(hits: Array<{ name: string; score: number }>): string {
+  const starters = hits.map((h) => `'${h.name}'`).join(", ");
   return (
-    `memorease: you may have a relevant memory named '${hit.name}' ` +
-    `(score ${hit.score.toFixed(2)}). Consider calling memory_query to recall it.`
+    `memorease gut feeling: something about the current conversation ` +
+    `resonates with stored memories — there may be relevant context you're ` +
+    `missing. Starting points: ${starters}. Call memory_query with terms ` +
+    `from the conversation to dig in; related memories beyond these may ` +
+    `surface too.`
   );
 }
 
@@ -262,19 +270,27 @@ export async function probeSubscriber(
     // Provenance gate: never tap a thread about a memory that thread itself
     // wrote — the knowledge is already in its context. Memories written
     // before this gate existed carry no sourceThreadId and pass through.
-    const top = hits.find(
-      (h) => h.metadata?.sourceThreadId !== sub.threadId,
+    const eligible = hits.filter(
+      (h) =>
+        h.metadata?.sourceThreadId !== sub.threadId &&
+        h.score >= TAP_THRESHOLD,
     );
-    if (!top || top.score < TAP_THRESHOLD) return "skipped-below-threshold";
+    if (eligible.length === 0) return "skipped-below-threshold";
 
-    const name = String(top.metadata?.name ?? "");
+    // Dedup keys on the top hit: if the strongest resonance hasn't changed
+    // within the window, the gut feeling hasn't either.
+    const name = String(eligible[0].metadata?.name ?? "");
     const now = Date.now();
     const last = state.lastNotifiedPerThread.get(sub.threadId);
     if (last && last.name === name && now - last.at < TAP_DEDUP_MS) {
       return "skipped-deduped";
     }
 
-    await notify(hintBody({ name, score: top.score }), sub);
+    const starters = eligible.map((h) => ({
+      name: String(h.metadata?.name ?? ""),
+      score: h.score,
+    }));
+    await notify(hintBody(starters), sub);
     state.lastNotifiedPerThread.set(sub.threadId, { name, at: now });
     state.notifiedCount += 1;
     return "notified";

@@ -141,11 +141,17 @@ describe("provider: text extraction", () => {
     expect(extractRecentUserText(undefined)).toBe("");
   });
 
-  it("hintBody formats the nudge without pasting memory content", () => {
-    const body = hintBody({ name: "voice-first", score: 0.7234 });
+  it("hintBody is a door, not a document: hints at exploration, never content", () => {
+    const body = hintBody([
+      { name: "voice-first", score: 0.7234 },
+      { name: "fleet-ssh-mesh", score: 0.61 },
+    ]);
     expect(body).toContain("voice-first");
-    expect(body).toContain("0.72");
+    expect(body).toContain("fleet-ssh-mesh");
     expect(body).toContain("memory_query");
+    // Framed as starting points for a dive, not as the memory itself.
+    expect(body).toContain("Starting points");
+    expect(body).toMatch(/dig in|explore/);
   });
 });
 

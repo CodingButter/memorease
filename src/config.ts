@@ -19,11 +19,14 @@ export type ResolvedConfig = {
 };
 
 /**
- * MastraCode plugin context shape — minimal subset we read.
+ * MastraCode plugin context shape — minimal subset we read. The full type
+ * lives in `src/index.ts`; here we only declare what `instructions` needs.
  */
 export type PluginContext = {
   config?: {
     connectionString?: string;
+    curatorModel?: string;
+    injectBudget?: string;
   };
 };
 
@@ -33,17 +36,15 @@ export type PluginContext = {
  * decides the fallback — libsql default for the storage decision.
  *
  * Path is computed lazily on each call (via `homedir()`) so tests that
- * override `process.env.HOME` are honored.
+ * override `process.env.HOME` are honored. The `MEMOREASE_SETTINGS_PATH`
+ * env var (when set) overrides the default location — used by curator tests
+ * to stub out the observer-model-override without touching the real file.
  */
-function readMastracodeSettings(): Record<string, unknown> | undefined {
+export function readMastracodeSettings(): Record<string, unknown> | undefined {
   try {
-    const settingsPath = join(
-      homedir(),
-      ".local",
-      "share",
-      "mastracode",
-      "settings.json",
-    );
+    const settingsPath =
+      process.env.MEMOREASE_SETTINGS_PATH ??
+      join(homedir(), ".local", "share", "mastracode", "settings.json");
     const raw = readFileSync(settingsPath, "utf8");
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {

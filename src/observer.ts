@@ -19,8 +19,8 @@
 
 import type { MastraVector } from "@mastra/core/vector";
 
-import { embed } from "./embed.js";
-import { createMemoreaseProvider, type TapStatus } from "./provider.js";
+import { embed } from "./embed.ts";
+import { createMemoreaseProvider, type TapStatus } from "./provider.ts";
 
 /** Minimal tool-context surface this module needs. */
 export type ToolCtxLike = {

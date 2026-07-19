@@ -25,8 +25,8 @@
 import { defineMastraCodePlugin } from "mastracode/plugin";
 import type { MastraCodePluginContext } from "mastracode/plugin";
 
-import { buildInstructions } from "./instructions.js";
-import { buildTools } from "./tools.js";
+import { buildInstructions } from "./instructions.ts";
+import { buildTools } from "./tools.ts";
 
 export default defineMastraCodePlugin({
   id: "memorease",

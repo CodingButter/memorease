@@ -19,18 +19,18 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { resolveConfig, type PluginContext } from "./config.js";
+import { resolveConfig, type PluginContext } from "./config.ts";
 import {
   createVectorStore,
   ensureSchema,
-} from "./store.js";
+} from "./store.ts";
 import type { MastraVector } from "@mastra/core/vector";
 import {
   forgetMemory,
   queryMemories,
   writeMemory,
-} from "./memory.js";
-import { armProvider, tapStatus, type ToolCtxLike } from "./observer.js";
+} from "./memory.ts";
+import { armProvider, tapStatus, type ToolCtxLike } from "./observer.ts";
 
 /**
  * Lazily-resolved store handle. The first tool call pays the ONNX warm-up and

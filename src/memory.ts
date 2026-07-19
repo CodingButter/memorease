@@ -17,9 +17,9 @@
 
 import type { MastraVector } from "@mastra/core/vector";
 import type { VectorFilter } from "@mastra/core/vector";
-import { embed } from "./embed.js";
-import { failSoft, type StorageResult } from "./errors.js";
-import { INDEX_NAME } from "./store.js";
+import { embed } from "./embed.ts";
+import { failSoft, type StorageResult } from "./errors.ts";
+import { INDEX_NAME } from "./store.ts";
 
 /**
  * Shape of a memory row as seen by tool callers and the boot injector.

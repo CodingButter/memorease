@@ -4,7 +4,7 @@ import type { MastraVector } from "@mastra/core/vector";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import type { ResolvedConfig } from "./config.js";
+import type { ResolvedConfig } from "./config.ts";
 
 /**
  * Storage layer. Two backends behind one `MastraVector` interface:

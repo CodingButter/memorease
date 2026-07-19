@@ -15,8 +15,8 @@
  * reads `auth.json` or env vars directly.
  */
 
-import type { MemoryHit } from "./memory.js";
-import { readMastracodeSettings } from "./config.js";
+import type { MemoryHit } from "./memory.ts";
+import { readMastracodeSettings } from "./config.ts";
 
 /**
  * Minimal shape of the plugin config we read here. The full type lives in

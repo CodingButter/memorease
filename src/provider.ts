@@ -24,8 +24,8 @@
 
 import { SignalProvider } from "@mastra/core/signals";
 import type { MastraVector } from "@mastra/core/vector";
-import { embed } from "./embed.js";
-import { INDEX_NAME } from "./store.js";
+import { embed } from "./embed.ts";
+import { INDEX_NAME } from "./store.ts";
 
 export type TapStatus =
   | "armed"

@@ -252,12 +252,19 @@ export async function probeSubscriber(
     if (!recent) return "skipped-no-text";
 
     const vector = await embedFn(recent);
+    // topK > 1 so a self-authored top hit can fall through to the next
+    // candidate instead of silencing the probe entirely.
     const hits = await store.query({
       indexName: INDEX_NAME,
       queryVector: vector,
-      topK: 1,
+      topK: 3,
     });
-    const top = hits[0];
+    // Provenance gate: never tap a thread about a memory that thread itself
+    // wrote — the knowledge is already in its context. Memories written
+    // before this gate existed carry no sourceThreadId and pass through.
+    const top = hits.find(
+      (h) => h.metadata?.sourceThreadId !== sub.threadId,
+    );
     if (!top || top.score < TAP_THRESHOLD) return "skipped-below-threshold";
 
     const name = String(top.metadata?.name ?? "");

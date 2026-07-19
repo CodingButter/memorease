@@ -42,6 +42,13 @@ export type MemoryRecord = {
   content: string;
   type?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Thread that created (or last updated) this memory. Stamped by the tool
+   * layer from the tool context. The gut-feeling tap uses it to skip
+   * reminding a thread about a memory that thread itself wrote — that
+   * knowledge is already in its context.
+   */
+  sourceThreadId?: string;
 };
 
 export type MemoryQueryOptions = {
@@ -136,6 +143,9 @@ export async function writeMemory(
       type: record.type ?? "fact",
       createdAt: now,
       updatedAt: now,
+      ...(record.sourceThreadId
+        ? { sourceThreadId: record.sourceThreadId }
+        : {}),
     };
     await store.upsert({
       indexName: INDEX_NAME,

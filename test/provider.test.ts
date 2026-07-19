@@ -75,7 +75,10 @@ function makeAgent(opts: {
   return agent;
 }
 
-type MockHit = { score: number; metadata?: { name?: string; content?: string } };
+type MockHit = {
+  score: number;
+  metadata?: { name?: string; content?: string; sourceThreadId?: string };
+};
 
 function makeMockStore(hits: MockHit[]) {
   return {
@@ -211,6 +214,69 @@ describe("provider: probeSubscriber", () => {
 
     expect(result).toBe("notified");
     expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("provenance gate: skips a hit the same thread wrote, taps the next candidate", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "tell me about the provider" }],
+      }),
+    });
+    // Top hit was authored by THIS thread — must be skipped; runner-up wins.
+    const store = makeMockStore([
+      {
+        score: TAP_THRESHOLD + 0.3,
+        metadata: { name: "self-authored", sourceThreadId: SUB.threadId },
+      },
+      {
+        score: TAP_THRESHOLD + 0.1,
+        metadata: { name: "other-thread", sourceThreadId: "someone-else" },
+      },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].body).toContain("other-thread");
+    expect(notifyCalls[0].body).not.toContain("self-authored");
+  });
+
+  it("provenance gate: silent when every above-threshold hit is self-authored", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "tell me about the provider" }],
+      }),
+    });
+    const store = makeMockStore([
+      {
+        score: TAP_THRESHOLD + 0.3,
+        metadata: { name: "self-authored", sourceThreadId: SUB.threadId },
+      },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("skipped-below-threshold");
+    expect(notifyCalls).toHaveLength(0);
   });
 
   it("skips when top hit is below TAP_THRESHOLD", async () => {

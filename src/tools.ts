@@ -282,6 +282,7 @@ export function buildTools(context: MastraCodePluginContext) {
           content: input.content,
           type: input.type,
           metadata: input.metadata,
+          sourceThreadId: toolCtx?.agent?.threadId,
         });
         if (!res.ok) return res;
         return { ok: true as const, written: res.value };
@@ -388,6 +389,7 @@ export function buildTools(context: MastraCodePluginContext) {
             distilledAt,
             skillPath,
           },
+          sourceThreadId: toolCtx?.agent?.threadId,
         });
         if (!writeRes.ok) {
           // File was written; provenance failed. Be honest about the partial.

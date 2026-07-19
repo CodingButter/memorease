@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+jobs:
+  test:
+    name: tsc + vitest (libsql + pg)
+    runs-on: ubuntu-latest
+
+    services:
+      pgvector:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_USER: memorease
+          POSTGRES_PASSWORD: memorease
+          POSTGRES_DB: memorease
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memorease -d memorease"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      MEMOREASE_PG_TEST_CONNECTION: postgresql://memorease:memorease@localhost:5432/memorease
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Test
+        run: pnpm exec vitest run --reporter=dot

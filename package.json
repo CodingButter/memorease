@@ -1,10 +1,29 @@
 {
   "name": "memorease",
   "version": "0.1.0",
-  "description": "Durable semantic memory for MastraCode — as a plugin.",
+  "description": "Durable semantic memory for MastraCode — as a plugin. Inspectable, self-hosted, removable.",
   "type": "module",
   "license": "MIT",
   "author": "CodingButter",
+  "homepage": "https://github.com/CodingButter/memorease#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CodingButter/memorease.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CodingButter/memorease/issues"
+  },
+  "keywords": [
+    "mastracode",
+    "mastra",
+    "memory",
+    "semantic",
+    "plugin",
+    "rag",
+    "fastembed",
+    "libsql",
+    "pgvector"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },

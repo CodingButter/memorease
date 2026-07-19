@@ -30,6 +30,7 @@ import {
   queryMemories,
   writeMemory,
 } from "./memory.js";
+import { armProvider, tapStatus, type ToolCtxLike } from "./observer.js";
 
 /**
  * Lazily-resolved store handle. The first tool call pays the ONNX warm-up and
@@ -49,14 +50,41 @@ function configFingerprint(ctx: PluginContext): string {
     : `libsql:${r.libsqlUrl ?? ""}`;
 }
 
-async function getStore(context: PluginContext): Promise<StoreHandle> {
+/**
+ * Resolve (and cache) the vector store. The first call per config fingerprint
+ * also fires `armProvider(toolCtx, store)` — this is where the gut-feeling
+ * signal provider gets connected to the live agent. Arming is memoized inside
+ * `armProvider` itself, so repeated calls are a no-op.
+ *
+ * `toolCtx` is optional: boot instructions and tests call `getStore` without a
+ * tool context, and arming is simply skipped (the provider arms on the first
+ * real tool call instead).
+ */
+async function getStore(
+  context: PluginContext,
+  toolCtx?: ToolCtxLike,
+): Promise<StoreHandle> {
   const fp = configFingerprint(context);
-  if (handle && handleConfigFingerprint === fp) return handle;
+  const cached = handle && handleConfigFingerprint === fp ? handle : undefined;
+  if (cached) {
+    // Even on a cache hit, attempt arming once if a tool context is present
+    // and we somehow haven't armed yet (e.g. first call after a cache hit
+    // from instructions). Memoized inside armProvider — cheap.
+    if (toolCtx) {
+      void armProvider({ toolCtx, store: cached.store }).catch(() => {});
+    }
+    return cached;
+  }
   const resolved = resolveConfig(context);
   const store = createVectorStore(resolved);
   await ensureSchema(store);
   handle = { store };
   handleConfigFingerprint = fp;
+  if (toolCtx) {
+    // Fire-and-forget — arming failures must not break the tool call. The
+    // deliberate-memory core works without the provider.
+    void armProvider({ toolCtx, store }).catch(() => {});
+  }
   return handle;
 }
 
@@ -149,9 +177,9 @@ export function buildTools(context: MastraCodePluginContext) {
         .optional()
         .describe("Top-K results. Defaults to 5."),
     }),
-    execute: async (input: { text: string; k?: number }) => {
+    execute: async (input: { text: string; k?: number }, toolCtx?: ToolCtxLike) => {
       try {
-        const { store } = await getStore(ctx);
+        const { store } = await getStore(ctx, toolCtx);
         const res = await queryMemories(store, input.text, {
           topK: input.k ?? 5,
         });
@@ -198,9 +226,9 @@ export function buildTools(context: MastraCodePluginContext) {
       content: string;
       type?: string;
       metadata?: Record<string, unknown>;
-    }) => {
+    }, toolCtx?: ToolCtxLike) => {
       try {
-        const { store } = await getStore(ctx);
+        const { store } = await getStore(ctx, toolCtx);
         const res = await writeMemory(store, {
           name: input.name,
           content: input.content,
@@ -228,9 +256,9 @@ export function buildTools(context: MastraCodePluginContext) {
         .min(1)
         .describe("Stable fact id to delete."),
     }),
-    execute: async (input: { name: string }) => {
+    execute: async (input: { name: string }, toolCtx?: ToolCtxLike) => {
       try {
-        const { store } = await getStore(ctx);
+        const { store } = await getStore(ctx, toolCtx);
         const res = await forgetMemory(store, input.name);
         if (!res.ok) return res;
         return { ok: true as const, forgotten: res.value.forgotten };
@@ -275,7 +303,7 @@ export function buildTools(context: MastraCodePluginContext) {
       fromNames: string[];
       summary: string;
       instructions: string;
-    }) => {
+    }, toolCtx?: ToolCtxLike) => {
       if (!isValidSlug(input.slug)) {
         return {
           ok: false as const,
@@ -283,7 +311,7 @@ export function buildTools(context: MastraCodePluginContext) {
         };
       }
       try {
-        const { store } = await getStore(ctx);
+        const { store } = await getStore(ctx, toolCtx);
         const skillsDir = resolveSkillsDir(ctx.config?.skillsDir);
         const skillDir = join(skillsDir, input.slug);
         const skillPath = join(skillDir, "SKILL.md");
@@ -337,11 +365,29 @@ export function buildTools(context: MastraCodePluginContext) {
     },
   });
 
+  const memory_tap_status = createTool({
+    id: "memory_tap_status",
+    description:
+      "Read-only probe of the experimental gut-feeling signal provider. Reports whether the provider is armed (actively polling for memory-relevant moments in the conversation) or disarmed, and why. No side effects — safe to call any time. The provider arms implicitly on the first memory_query or memory_write call; if it's disarmed, the deliberate-memory core still works (this is an experimental layer on top).",
+    inputSchema: z.object({}).describe("No arguments."),
+    execute: async () => {
+      try {
+        return { ok: true as const, status: tapStatus() };
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: brandedFromError(err, "tap_status"),
+        };
+      }
+    },
+  });
+
   return {
     memory_query: { tool: memory_query },
     memory_write: { tool: memory_write },
     memory_forget: { tool: memory_forget },
     memory_distill_skill: { tool: memory_distill_skill },
+    memory_tap_status: { tool: memory_tap_status },
   };
 }
 

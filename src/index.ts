@@ -6,8 +6,8 @@
  *   - `instructions(context)`: at session boot, query the memory store, rank
  *     via the curator if armed (or vector similarity otherwise), and inject a
  *     `## Memories` section into the system prompt. Never throws.
- *   - `tools(context)`: four tools — memory_query, memory_write, memory_forget,
- *     memory_distill_skill.
+ *   - `tools(context)`: five tools — memory_query, memory_write, memory_forget,
+ *     memory_distill_skill, memory_tap_status.
  *
  * Auto-defaults:
  *   - Storage backend: explicit `connectionString` wins; otherwise reuse the

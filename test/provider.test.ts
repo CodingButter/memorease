@@ -1,0 +1,612 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  probeSubscriber,
+  newProbeState,
+  extractText,
+  extractRecentUserText,
+  hintBody,
+  TAP_THRESHOLD,
+  createMemoreaseProvider,
+  type ProbeState,
+  type TapStatus,
+} from "../src/provider.js";
+import {
+  armProvider,
+  tapStatus,
+  findLiveAgent,
+  _resetArmingForTests,
+} from "../src/observer.js";
+import { _resetStoreForTests } from "../src/tools.js";
+import { _resetForTests as resetConfig } from "../src/config.js";
+
+/**
+ * Provider tests cover the fail-soft surface of the gut-feeling signal layer.
+ * The armed live-path (real mastracode observer firing `notify` inside an
+ * actual thread) is verified in the Phase 6 demo, not here — these tests prove
+ * the disarmed paths, the threshold/dedup behavior of `probeSubscriber`, and
+ * the read-only `memory_tap_status` tool's contract.
+ *
+ * `probeSubscriber` is exported specifically so tests can drive it directly
+ * with mock mastra/store/embed/notify — no real SignalProvider subclass or
+ * polling loop needed.
+ */
+
+// --- helpers --------------------------------------------------------------
+
+type MockMsg = {
+  id?: string;
+  role?: string;
+  content?:
+    | string
+    | { format?: number; content?: string; parts?: Array<{ type: string; text?: string }> };
+};
+
+function makeAgent(opts: {
+  recallImpl?: (args: {
+    threadId: string | string[];
+    resourceId?: string;
+    perPage?: number | false;
+  }) => Promise<{ messages: MockMsg[] }>;
+  hasSendSignal?: boolean;
+}) {
+  const agent: {
+    memory?: { recall: (args: unknown) => Promise<{ messages: MockMsg[] }> };
+    sendNotificationSignal?: (...args: unknown[]) => void;
+  } = {};
+  if (opts.recallImpl) {
+    agent.memory = {
+      recall: ((args: unknown) =>
+        opts.recallImpl!(args as Parameters<typeof opts.recallImpl>[0])) as typeof agent.memory extends {
+        recall: infer R;
+      }
+        ? R
+        : never,
+    };
+  }
+  if (opts.hasSendSignal) {
+    agent.sendNotificationSignal = () => {};
+  }
+  return agent;
+}
+
+type MockHit = { score: number; metadata?: { name?: string } };
+
+function makeMockStore(hits: MockHit[]) {
+  return {
+    query: async () => hits,
+  };
+}
+
+function makeMockEmbedder(vector: number[]) {
+  return async () => vector;
+}
+
+const SUB = { threadId: "t1", resourceId: "r1" };
+
+// --- pure helpers ---------------------------------------------------------
+
+describe("provider: text extraction", () => {
+  it("extractText handles V1 string content", () => {
+    expect(extractText({ role: "user", content: "hello world" })).toBe("hello world");
+  });
+
+  it("extractText handles V2 parts-array content", () => {
+    const msg = {
+      role: "user",
+      content: {
+        format: 2,
+        parts: [
+          { type: "text", text: "first" },
+          { type: "text", text: "second" },
+        ],
+      },
+    };
+    expect(extractText(msg)).toBe("first\nsecond");
+  });
+
+  it("extractText returns empty string for unrecognised shapes", () => {
+    expect(extractText(undefined)).toBe("");
+    expect(extractText({})).toBe("");
+    expect(extractText({ content: { format: 2, parts: [] } })).toBe("");
+  });
+
+  it("extractRecentUserText prefers the latest user message", () => {
+    const msgs = [
+      { role: "user", content: "old user" },
+      { role: "assistant", content: "reply" },
+      { role: "user", content: "new user" },
+    ];
+    expect(extractRecentUserText(msgs)).toBe("new user");
+  });
+
+  it("extractRecentUserText falls back to latest of any role", () => {
+    const msgs = [
+      { role: "assistant", content: "first" },
+      { role: "assistant", content: "latest" },
+    ];
+    expect(extractRecentUserText(msgs)).toBe("latest");
+  });
+
+  it("extractRecentUserText returns empty for empty list", () => {
+    expect(extractRecentUserText([])).toBe("");
+    expect(extractRecentUserText(undefined)).toBe("");
+  });
+
+  it("hintBody formats the nudge without pasting memory content", () => {
+    const body = hintBody({ name: "voice-first", score: 0.7234 });
+    expect(body).toContain("voice-first");
+    expect(body).toContain("0.72");
+    expect(body).toContain("memory_query");
+  });
+});
+
+// --- probeSubscriber: threshold + dedup + fail-soft ----------------------
+
+describe("provider: probeSubscriber", () => {
+  let state: ProbeState;
+  let notifyCalls: Array<{ body: string; sub: typeof SUB }>;
+
+  beforeEach(() => {
+    state = newProbeState();
+    notifyCalls = [];
+  });
+
+  it("notifies on a hit above TAP_THRESHOLD", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "what does jamie prefer?" }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: TAP_THRESHOLD + 0.1, metadata: { name: "voice-first" } },
+    ]);
+    const embedFn = makeMockEmbedder([1, 2, 3]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      embedFn,
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].body).toContain("voice-first");
+    expect(state.notifiedCount).toBe(1);
+  });
+
+  it("skips when top hit is below TAP_THRESHOLD", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: TAP_THRESHOLD - 0.01, metadata: { name: "weak" } },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("skipped-below-threshold");
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("dedupes same hit within TAP_DEDUP_MS", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "same-hit" } },
+    ]);
+    const notify = async (body: string) => {
+      notifyCalls.push({ body, sub: SUB });
+    };
+
+    const r1 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    const r2 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("skipped-deduped");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("skips when recall returns no usable text", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({ messages: [] }),
+    });
+    const store = makeMockStore([{ score: 0.99, metadata: { name: "x" } }]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("skipped-no-text");
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("disarms (no-memory) when agent.memory.recall is missing", async () => {
+    const agent = makeAgent({}); // no recall
+    const store = makeMockStore([]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("disarmed-no-memory");
+    expect(state.disarmedReason).toBe("disarmed-no-memory");
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("swallows recall throws and records lastError", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => {
+        throw new Error("recall blew up");
+      },
+    });
+    const store = makeMockStore([]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("error");
+    expect(state.lastError).toContain("recall blew up");
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("swallows store.query throws and records lastError", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = {
+      query: async () => {
+        throw new Error("pg connection lost");
+      },
+    };
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("error");
+    expect(state.lastError).toContain("pg connection lost");
+  });
+
+  it("swallows embed throws and records lastError", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = makeMockStore([{ score: 0.99 }]);
+    const badEmbed = async () => {
+      throw new Error("onnx load failed");
+    };
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      badEmbed,
+      SUB,
+      state,
+      async () => {
+        notifyCalls.push({ body: "", sub: SUB });
+      },
+    );
+
+    expect(result).toBe("error");
+    expect(state.lastError).toContain("onnx load failed");
+  });
+});
+
+// --- armProvider: live-agent ladder ---------------------------------------
+
+describe("provider: armProvider", () => {
+  beforeEach(() => {
+    _resetArmingForTests();
+    resetConfig();
+    _resetStoreForTests();
+  });
+
+  afterEach(() => {
+    _resetArmingForTests();
+    resetConfig();
+    _resetStoreForTests();
+  });
+
+  it("returns disarmed-no-agent when toolCtx is undefined", async () => {
+    const store = makeMockStore([]);
+    const result = await armProvider({
+      toolCtx: undefined,
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+    expect(result.status).toBe("disarmed-no-agent" satisfies TapStatus);
+    expect(result.freshlyArmed).toBe(false);
+  });
+
+  it("returns disarmed-no-agent when mastra is missing", async () => {
+    const store = makeMockStore([]);
+    const result = await armProvider({
+      toolCtx: { agent: { agentId: "a1" } },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+    expect(result.status).toBe("disarmed-no-agent");
+  });
+
+  it("returns disarmed-no-signal when agent lacks sendNotificationSignal", async () => {
+    const store = makeMockStore([]);
+    // mastra returns an agent, but without sendNotificationSignal
+    const mastra = {
+      getAgentById: () => ({ id: "a1", name: "main" }), // no signal method
+    };
+    const result = await armProvider({
+      toolCtx: { agent: { agentId: "a1" }, mastra },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+    expect(result.status).toBe("disarmed-no-signal");
+  });
+
+  it("arms via mastra.getAgentById when agent has sendNotificationSignal", async () => {
+    const store = makeMockStore([]);
+    const connectedAgent = {
+      id: "a1",
+      name: "main",
+      sendNotificationSignal: () => {},
+      memory: { recall: async () => ({ messages: [] }) },
+    };
+    const mastra = {
+      getAgentById: () => connectedAgent,
+    };
+
+    const result = await armProvider({
+      toolCtx: { agent: { agentId: "a1" }, mastra },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    expect(result.status).toBe("armed");
+    expect(result.via).toBe("mastra.getAgentById");
+    expect(result.freshlyArmed).toBe(true);
+  });
+
+  it("memoizes: second call does not re-arm", async () => {
+    const store = makeMockStore([]);
+    const connectedAgent = {
+      id: "a1",
+      sendNotificationSignal: () => {},
+    };
+    const mastra = {
+      getAgentById: () => connectedAgent,
+    };
+    const toolCtx = { agent: { agentId: "a1" }, mastra };
+
+    const r1 = await armProvider({
+      toolCtx,
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+    const r2 = await armProvider({
+      toolCtx,
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    expect(r1.freshlyArmed).toBe(true);
+    expect(r2.freshlyArmed).toBe(false);
+    expect(r2.status).toBe("armed");
+  });
+});
+
+// --- findLiveAgent: lookup ladder -----------------------------------------
+
+describe("provider: findLiveAgent ladder", () => {
+  it("returns undefined when mastra is absent", () => {
+    expect(findLiveAgent({ agent: { agentId: "x" } })).toBeUndefined();
+  });
+
+  it("returns undefined when no agent has sendNotificationSignal", () => {
+    const mastra = {
+      getAgentById: () => ({ id: "x" }), // no signal
+      getAgent: () => undefined,
+      getAgents: () => ({}),
+    };
+    expect(findLiveAgent({ agent: { agentId: "x" }, mastra })).toBeUndefined();
+  });
+
+  it("falls through getAgentById → getAgent → getAgents", () => {
+    const withSignal = { id: "a1", sendNotificationSignal: () => {} };
+    const mastra = {
+      getAgentById: () => undefined,
+      getAgent: () => undefined,
+      getAgents: () => ({ main: withSignal }),
+    };
+    const found = findLiveAgent({ agent: { agentId: "a1" }, mastra });
+    expect(found?.via).toBe("mastra.getAgents");
+    expect(found?.agent).toBe(withSignal);
+  });
+
+  it("prefers a name match in getAgents over the single-agent fallback", () => {
+    const named = { id: "a1", name: "main", sendNotificationSignal: () => {} };
+    const other = { id: "a2", name: "other", sendNotificationSignal: () => {} };
+    const mastra = {
+      getAgents: () => ({ main: named, other }),
+    };
+    const found = findLiveAgent({
+      agent: { agentId: "main" },
+      mastra,
+    });
+    expect(found?.agent).toBe(named);
+  });
+});
+
+// --- memory_tap_status -----------------------------------------------------
+
+describe("provider: tapStatus probe", () => {
+  beforeEach(() => {
+    _resetArmingForTests();
+  });
+
+  it("returns disarmed-no-agent when never armed", () => {
+    const s = tapStatus();
+    expect(s.status).toBe("disarmed-no-agent");
+    expect(s.provider).toBeUndefined();
+  });
+
+  it("exposes provider status snapshot after arming", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({
+        id: "a1",
+        sendNotificationSignal: () => {},
+      }),
+    };
+    await armProvider({
+      toolCtx: { agent: { agentId: "a1" }, mastra },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+    const s = tapStatus();
+    expect(s.status).toBe("armed");
+    expect(s.via).toBe("mastra.getAgentById");
+    // Provider status snapshot exists (the concrete shape is the subclass's
+    // getStatus() return — just assert it's an object with expected fields).
+    expect(typeof s.provider).toBe("object");
+    const ps = s.provider as { notifiedCount?: number; armed?: boolean };
+    expect(ps).toHaveProperty("notifiedCount");
+    expect(ps).toHaveProperty("armed");
+  });
+});
+
+// --- createMemoreaseProvider: subclass smoke ------------------------------
+
+describe("provider: createMemoreaseSignalProvider subclass", () => {
+  it("builds an instance with the expected id and pollInterval", () => {
+    const store = makeMockStore([]);
+    const p = createMemoreaseProvider({
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+      pollIntervalMs: 12345,
+    }) as {
+      id: string;
+      name: string;
+      pollInterval: number;
+      getStatus(): Record<string, unknown>;
+    };
+
+    expect(p.id).toBe("memorease-gut-feeling");
+    expect(p.name).toBe("Memorease gut-feeling");
+    expect(p.pollInterval).toBe(12345);
+    expect(typeof p.getStatus).toBe("function");
+  });
+
+  it("getStatus reports initial state with zero notifications", () => {
+    const store = makeMockStore([]);
+    const p = createMemoreaseProvider({
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    }) as { getStatus(): { notifiedCount: number; armed: boolean } };
+
+    const s = p.getStatus();
+    expect(s.notifiedCount).toBe(0);
+    expect(typeof s.armed).toBe("boolean");
+  });
+});
+
+// --- type-strip safety: no enum/namespace in src/ -------------------------
+
+/**
+ * Node's native type-stripping (the mastracode loader's fallback path when no
+ * tsx-style transpiler is active) rejects `enum`, `namespace`, and parameter
+ * properties. Guard against regressions by scanning src/*.ts statically.
+ *
+ * This is the meaningful test for the adversarial-review finding (the original
+ * Phase 5 used a TypeScript `enum`). A dynamic `import()` test would not catch
+ * the issue because tsx/esbuild tolerate enums — the failure only shows up in
+ * strip-only mode.
+ */
+describe("provider: type-strip safety (no enum/namespace in src/)", () => {
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+
+  it("no src/*.ts file declares an enum or namespace", () => {
+    const files = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
+    expect(files.length).toBeGreaterThan(0);
+    const offenders: string[] = [];
+    for (const f of files) {
+      const src = readFileSync(join(srcDir, f), "utf8");
+      // Match `enum Foo`, `namespace Foo`, but NOT inside strings/comments.
+      // Crude but effective: word-boundary `enum ` / `namespace ` at the start
+      // of a statement (preceded by ; { } newline or start of file).
+      const enumMatches = src.match(/(^|[;{}\n])\s*(?:export\s+)?enum\s+[A-Za-z_$]/);
+      const nsMatches = src.match(/(^|[;{}\n])\s*(?:export\s+)?namespace\s+[A-Za-z_$]/);
+      if (enumMatches) offenders.push(`${f}: enum (${enumMatches[0].trim()})`);
+      if (nsMatches) offenders.push(`${f}: namespace (${nsMatches[0].trim()})`);
+    }
+    expect(offenders).toEqual([]);
+  });
+});

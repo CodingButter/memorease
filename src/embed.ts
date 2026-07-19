@@ -2,8 +2,20 @@ import { fastembed } from "@mastra/fastembed";
 
 /**
  * Embedding model: `fastembed.small` — 384-dim, local ONNX inference, no API
- * keys. Same model mastracode uses internally for its observational memory
- * system (verified at `sdk/src/agents/memory.ts`).
+ * keys.
+ *
+ * NOTE: a previous version of this comment claimed fastembed is "the same model
+ * mastracode uses internally for its observational memory system," citing
+ * `sdk/src/agents/memory.ts`. That path does not exist in the shipped mastracode
+ * bundle, and no fastembed/InferenceSession/doEmbed import can be found in its
+ * dist. mastracode's observational memory does not appear to use local ONNX at
+ * all (likely a remote embedding endpoint or no vector embedding). The claim was
+ * unverified and has been removed.
+ *
+ * Consequence: loading fastembed.small triggers ONNX's device-discovery probe,
+ * which warns when `/sys/class/drm/card0/device/vendor` is unreadable (common
+ * in sandboxes). The warning is cosmetic — inference falls back to CPU — and
+ * is not silenced here.
  *
  * First call loads the ONNX model (~50MB download from cache, then in-process).
  * Subsequent calls reuse the cached model instance.

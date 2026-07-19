@@ -105,15 +105,21 @@ describe("instructions: storage reachable", () => {
 
     expect(section).toContain("## Memories");
     expect(section).toContain("voice-first");
+    // Directive is always prepended — even when memories exist.
+    expect(section).toContain("## Memorease");
+    expect(section).toContain("QUERY ON INSTINCT");
     // Disarmed-curator note is appended when the curator isn't configured.
     expect(section).toMatch(/curator disarmed/);
   });
 
-  it("returns empty string (or just the note) when the store is empty", async () => {
+  it("returns the directive (but no Memories section) when the store is empty", async () => {
     const section = await buildInstructions({
       config: { connectionString: undefined, curatorModel: undefined },
     });
-    // Either empty, or just the curator-disarmed note — never a section.
+    // Fresh sessions must still learn memorease exists — the directive is
+    // load-bearing. But no `## Memories` section because nothing is stored.
+    expect(section).toContain("## Memorease");
+    expect(section).toContain("QUERY ON INSTINCT");
     expect(section).not.toContain("## Memories");
   });
 

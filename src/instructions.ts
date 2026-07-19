@@ -20,22 +20,48 @@
 import { hostname } from "node:os";
 import { basename } from "node:path";
 
-import { resolveConfig, type PluginContext } from "./config.js";
+import { resolveConfig, type PluginContext } from "./config.ts";
 import {
   createVectorStore,
   ensureSchema,
-} from "./store.js";
-import { queryMemories, type MemoryHit } from "./memory.js";
+} from "./store.ts";
+import { queryMemories, type MemoryHit } from "./memory.ts";
 import {
   curateForBoot,
   curatorPreflightError,
   renderHit,
   resolveCuratorModel,
   resolveInjectBudget,
-} from "./curator.js";
-import { failSoft, type StorageResult } from "./errors.js";
+} from "./curator.ts";
+import { failSoft, type StorageResult } from "./errors.ts";
 
 const BOOT_TIMEOUT_DEFAULT_MS = 3000;
+
+/**
+ * The behavioral directive. ALWAYS prepended to the injected section (on both
+ * the empty-store and success paths) so every session — even a fresh one with
+ * nothing in the store yet — knows memorease exists and when to reach for it.
+ *
+ * Without this, a session that boots into an empty store gets an empty
+ * instruction string and never discovers the memory tools, which is the bug
+ * this constant exists to close: the agent must be told to QUERY ON INSTINCT
+ * or it will answer "I don't know" without ever checking memory.
+ */
+const MEMOREASE_DIRECTIVE = [
+  "## Memorease — Global Knowledge Layer",
+  "",
+  "Memorease is your persistent store for any knowledge that isn't project-local: facts about the user, lessons learned, recurring patterns, cross-project context, durable preferences, distilled skills. If a learning would be useful beyond the current project, it belongs here.",
+  "",
+  "Three behaviors, all required:",
+  "",
+  '1. QUERY ON INSTINCT. Any time you have a flicker of "I might know something about this" — a personal question, a tooling choice, an error pattern, a user preference, a past decision — run `memory_query` BEFORE you answer. A missed query when memory had the answer is a bug. "I don\'t know / I can\'t do that" is never final until you\'ve checked memory.',
+  "",
+  "2. WRITE ON LEARN. The moment a durable fact lands — a preference, an infra detail, a decision and its rationale, a lesson worth carrying forward — write it to memorease immediately via `memory_write`. Don't batch. If you find yourself doing the same thing across sessions, that's the signal to write it.",
+  "",
+  "3. DISTILL WHEN RECURRING. When a cluster of memories becomes a repeatable workflow, use `memory_distill_skill` to fold it into a skill. Skills make the knowledge active, not just retrievable.",
+  "",
+  "Scope rule: project-only details (a specific bug, a local file path, a task-in-progress) stay in the task/thread. Anything that would help tomorrow, on a different project, or with a different question goes to memorease.",
+].join("\n");
 
 function bootTimeoutMs(): number {
   const raw = Number.parseInt(process.env.MEMOREASE_BOOT_TIMEOUT_MS ?? "", 10);
@@ -251,10 +277,14 @@ export async function buildInstructions(
 
   const candidates = queryResult.value;
   if (candidates.length === 0) {
-    // Nothing stored yet. Don't inject an empty section — but DO surface the
-    // disarmed-curator note if applicable, so the user sees the hint early.
+    // Nothing stored yet — but the directive is load-bearing: a fresh session
+    // must still know memorease exists and when to reach for the tools, or it
+    // will answer "I don't know" without ever querying. Append the
+    // disarmed-curator note if applicable.
     const note = curatorNote(context.config ?? {});
-    return note ? note.trim() : "";
+    return note
+      ? `${MEMOREASE_DIRECTIVE}\n\n${note.trim()}`
+      : MEMOREASE_DIRECTIVE;
   }
 
   const curate = await curateForBoot(
@@ -264,8 +294,8 @@ export async function buildInstructions(
     buildSessionContext(),
   );
 
-  return renderMemoriesSection(curate.hits, {
+  return `${MEMOREASE_DIRECTIVE}\n\n${renderMemoriesSection(curate.hits, {
     curatorNote: curate.usedCurator ? undefined : curatorNote(context.config ?? {}),
     fallbackNote: curate.fallbackNote,
-  });
+  })}`;
 }

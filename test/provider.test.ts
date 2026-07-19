@@ -185,6 +185,34 @@ describe("provider: probeSubscriber", () => {
     expect(state.notifiedCount).toBe(1);
   });
 
+  it("resolves memory via async agent.getMemory() when .memory is absent (real Agent shape)", async () => {
+    // Real mastra Agents expose memory behind getMemory(), not a .memory prop.
+    const agent = {
+      getMemory: async () => ({
+        recall: async () => ({
+          messages: [{ role: "user", content: "what does jamie prefer?" }],
+        }),
+      }),
+    };
+    const store = makeMockStore([
+      { score: TAP_THRESHOLD + 0.1, metadata: { name: "voice-first" } },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1, 2, 3]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
   it("skips when top hit is below TAP_THRESHOLD", async () => {
     const agent = makeAgent({
       recallImpl: async () => ({

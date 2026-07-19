@@ -45,19 +45,44 @@ export const DEFAULT_POLL_MS = 30_000;
 /** How many recent messages to pull from each thread per poll. */
 const RECALL_PER_PAGE = 10;
 
+/** Minimal structural surface this module needs from a memory instance. */
+type MemoryLike = {
+  recall?: (args: {
+    threadId: string | string[];
+    resourceId?: string;
+    perPage?: number | false;
+  }) => Promise<{
+    messages: Array<RecallMessageLike>;
+  }>;
+};
+
 /** Minimal structural surface this module needs from a live mastra agent. */
 type LiveAgentLike = {
-  memory?: {
-    recall?: (args: {
-      threadId: string | string[];
-      resourceId?: string;
-      perPage?: number | false;
-    }) => Promise<{
-      messages: Array<RecallMessageLike>;
-    }>;
-  };
+  memory?: MemoryLike;
+  getMemory?: () => Promise<MemoryLike | undefined>;
   sendNotificationSignal?: unknown;
 };
+
+/**
+ * Resolve a usable memory instance from a live agent. Real `Agent` objects
+ * expose memory behind the async `getMemory()` accessor (which resolves
+ * function-based memory config); a plain `.memory` property is accepted first
+ * for tests and older shapes. Returns undefined when neither yields an object
+ * with a callable `recall`.
+ */
+async function resolveMemory(
+  agent: LiveAgentLike | undefined,
+): Promise<MemoryLike | undefined> {
+  if (!agent) return undefined;
+  if (agent.memory && typeof agent.memory.recall === "function") {
+    return agent.memory;
+  }
+  if (typeof agent.getMemory === "function") {
+    const mem = await agent.getMemory();
+    if (mem && typeof mem.recall === "function") return mem;
+  }
+  return undefined;
+}
 
 /** Defensive shape of one recalled message (covers V1 and V2 formats). */
 type RecallMessageLike = {
@@ -213,12 +238,12 @@ export async function probeSubscriber(
   notify: (body: string, sub: SubLike) => Promise<void>,
 ): Promise<"notified" | "skipped-below-threshold" | "skipped-deduped" | "skipped-no-text" | "disarmed-no-memory" | "error"> {
   try {
-    const agent = getAgent();
-    if (!agent?.memory || typeof agent.memory.recall !== "function") {
+    const memory = await resolveMemory(getAgent());
+    if (!memory?.recall) {
       state.disarmedReason = "disarmed-no-memory";
       return "disarmed-no-memory";
     }
-    const recalled = await agent.memory.recall({
+    const recalled = await memory.recall({
       threadId: sub.threadId,
       resourceId: sub.resourceId,
       perPage: RECALL_PER_PAGE,
@@ -291,11 +316,11 @@ export async function bootCurateSubscriber(
     return "skipped-already-curated";
   }
   try {
-    const agent = getAgent();
-    if (!agent?.memory || typeof agent.memory.recall !== "function") {
+    const memory = await resolveMemory(getAgent());
+    if (!memory?.recall) {
       return "disarmed-no-memory";
     }
-    const recalled = await agent.memory.recall({
+    const recalled = await memory.recall({
       threadId: sub.threadId,
       resourceId: sub.resourceId,
       perPage: RECALL_PER_PAGE,

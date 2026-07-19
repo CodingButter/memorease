@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Local databases (do not commit user memory stores)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Mastra Code session / plan / progress files (per-repo private state)
+.mastracode/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

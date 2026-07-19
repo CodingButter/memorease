@@ -654,6 +654,69 @@ describe("provider: armProvider", () => {
     expect(r2.freshlyArmed).toBe(false);
     expect(r2.status).toBe("armed");
   });
+
+  it("subscribes the calling thread on fresh arm (poll has something to iterate)", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+
+    await armProvider({
+      toolCtx: {
+        agent: { agentId: "a1", threadId: "t1", resourceId: "r1" },
+        mastra,
+      },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    const status = tapStatus();
+    expect(status.status).toBe("armed");
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(1);
+  });
+
+  it("registers new threads on memoized calls and dedups repeats", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+    const ctxFor = (threadId: string) => ({
+      agent: { agentId: "a1", threadId, resourceId: "r1" },
+      mastra,
+    });
+
+    await armProvider({ toolCtx: ctxFor("t1"), store: store as never, embedFn: makeMockEmbedder([1]) });
+    // Same thread again — must not double-subscribe.
+    await armProvider({ toolCtx: ctxFor("t1"), store: store as never, embedFn: makeMockEmbedder([1]) });
+    // A second thread arriving later in the process — must get its own sub.
+    await armProvider({ toolCtx: ctxFor("t2"), store: store as never, embedFn: makeMockEmbedder([1]) });
+
+    const status = tapStatus();
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(2);
+  });
+
+  it("arms without a subscription when toolCtx lacks threadId (no throw)", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+
+    const result = await armProvider({
+      toolCtx: { agent: { agentId: "a1" }, mastra },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    expect(result.status).toBe("armed");
+    const status = tapStatus();
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(0);
+  });
 });
 
 // --- findLiveAgent: lookup ladder -----------------------------------------

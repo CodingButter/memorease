@@ -78,6 +78,14 @@ type SubLike = {
   resourceId: string;
 };
 
+/**
+ * The one "external resource" this provider monitors: the global memory
+ * store itself. Every subscribed thread shares it — the per-thread signal
+ * targeting comes from the subscription's threadId/resourceId, not from
+ * distinct external resources.
+ */
+export const EXTERNAL_RESOURCE_ID = "memorease:global";
+
 /** Mutable probe state — owned by the provider, passed to `probeSubscriber`. */
 export type ProbeState = {
   /** threadId → { name, at } last notification, for dedup. */
@@ -418,6 +426,18 @@ export function createMemoreaseProvider({
         },
         { threadId: target.threadId, resourceId: target.resourceId },
       );
+    }
+
+    /**
+     * Public wrapper around the protected base `subscribe` — the arming
+     * surface calls this with the current thread from the tool context.
+     * Without at least one subscription, `poll()` iterates nothing and no
+     * signal (gut-feeling or boot-curation) can ever fire.
+     */
+    subscribeThread(threadId: string, resourceId: string): void {
+      const target = { threadId, resourceId };
+      if (this.hasSubscription(target, EXTERNAL_RESOURCE_ID)) return;
+      this.subscribe(target, EXTERNAL_RESOURCE_ID);
     }
 
     async poll(subscriptions: Array<SubLike>): Promise<void> {

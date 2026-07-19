@@ -1,0 +1,94 @@
+import { PgVector } from "@mastra/pg";
+import { LibSQLVector } from "@mastra/libsql";
+import type { MastraVector } from "@mastra/core/vector";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+
+import type { ResolvedConfig } from "./config.js";
+
+/**
+ * Storage layer. Two backends behind one `MastraVector` interface:
+ *  - libsql (default): local file, zero-config, in-process cosine.
+ *  - pg: Postgres+pgvector, opt-in via connection string or auto-detected from
+ *        mastracode's settings.json when the host is configured for pg.
+ *
+ * Embeddings are stored in-row with metadata (single query = semantic rank +
+ * relational filter). Dedup-by-name uses explicit delete-then-insert via
+ * `deleteVectors({filter:{name:{$eq}}})` followed by `upsert()` — see
+ * `src/memory.ts` for the rationale (R1: `upsert({deleteFilter})` is silently
+ * ignored by LibSQLVector).
+ */
+
+export const INDEX_NAME = "memorease_memories";
+export const DIMENSION = 384;
+export const METRIC = "cosine" as const;
+
+/**
+ * Construct the backend vector store from a resolved config. Does NOT create
+ * the index — that's the caller's responsibility (see `ensureSchema`).
+ */
+export function createVectorStore(
+  config: ResolvedConfig,
+): MastraVector {
+  if (config.backend === "pg") {
+    if (!config.connectionString) {
+      throw new Error(
+        "pg backend selected but no connection string was resolved",
+      );
+    }
+    return new PgVector({
+      id: "memorease",
+      connectionString: config.connectionString,
+    });
+  }
+  // libsql path: ensure the parent directory exists (data dir may not yet).
+  const url = config.libsqlUrl;
+  if (!url) throw new Error("libsql backend selected but no url was resolved");
+  // Best-effort: create the parent dir for file: URLs (no-op for :memory:).
+  // SYNC mkdir (not `void mkdir` from fs/promises) closes the parent-dir race
+  // that used to underpin the M2 sync-throw path: the dir is guaranteed to
+  // exist before `new LibSQLVector()` reads it. Swallowed because libsql will
+  // fail loudly on init if the dir is still unreachable (e.g. EACCES).
+  if (url.startsWith("file:") && !url.includes(":memory:")) {
+    const fsPath = url.slice("file:".length);
+    try {
+      mkdirSync(dirname(fsPath), { recursive: true });
+    } catch {
+      /* swallowed — see comment above */
+    }
+  }
+  return new LibSQLVector({ id: "memorease", url });
+}
+
+/**
+ * Idempotent index bootstrap. Checks `describeIndex`; on "absent" error, calls
+ * `createIndex`. Any other error propagates.
+ *
+ * NOT memoized: callers that need a guaranteed-fresh index (e.g., tests that
+ * drop+recreate between cases) rely on each call re-checking. The cost is one
+ * `describeIndex` roundtrip per call, which is negligible at boot-time cadence.
+ *
+ * R5: NOT called eagerly inside `createVectorStore`. Callers wrap it in the
+ * same fail-soft net that catches store errors.
+ */
+export async function ensureSchema(store: MastraVector): Promise<void> {
+  try {
+    await store.describeIndex({ indexName: INDEX_NAME });
+    // Index exists — assume correct dimension. (Re-create is out of scope;
+    // a dimension mismatch would surface as a query-time error.)
+    return;
+  } catch (err) {
+    // Heuristic: "does not exist" / "not found" / "no such" / "unknown" →
+    // create. Anything else → throw. Covers pg ("relation does not exist")
+    // and libsql ("Table X not found") absent-index messages.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/not exist|does not exist|not found|no such|unknown|absent|404/i.test(msg)) {
+      throw err;
+    }
+    await store.createIndex({
+      indexName: INDEX_NAME,
+      dimension: DIMENSION,
+      metric: METRIC,
+    });
+  }
+}

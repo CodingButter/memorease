@@ -1,0 +1,9 @@
+allowBuilds:
+  "@google/genai": true
+  agent-browser: false
+  bufferutil: false
+  edgedriver: false
+  esbuild: true
+  geckodriver: false
+  onnxruntime-node: true
+  protobufjs: true

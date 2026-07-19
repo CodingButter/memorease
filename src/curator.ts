@@ -116,7 +116,6 @@ function parseCuratorReply(
   candidates: MemoryHit[],
 ): MemoryHit[] | undefined {
   const byName = new Map(candidates.map((c) => [c.name, c]));
-  const names = candidates.map((c) => c.name);
 
   const tryExtract = (obj: unknown): string[] | undefined => {
     if (!obj || typeof obj !== "object") return undefined;
@@ -156,7 +155,6 @@ function parseCuratorReply(
     // silently substituting our own ranking. The caller decides what to do.
     return undefined;
   }
-  void names;
   return out;
 }
 

@@ -126,6 +126,58 @@ describe("memory ops: libsql backend", () => {
     const f = await forgetMemory(store, "never-existed");
     expect(f.ok).toBe(true);
   });
+
+  it("caller metadata cannot overwrite system fields (name/content/type)", async () => {
+    // Regression: an adversarial `metadata:{name:"evil"}` used to rebind the
+    // row's lookup key because caller metadata was spread last. Verify the
+    // system fields win and subsequent dedup/forget still find the row.
+    const w = await writeMemory(store, {
+      name: "legit",
+      content: "real content",
+      metadata: {
+        name: "evil",
+        content: "hijacked",
+        type: "hijacked-type",
+        custom: "kept",
+      },
+    });
+    expect(w.ok).toBe(true);
+
+    const q = await queryMemories(store, "real content");
+    expect(q.ok).toBe(true);
+    if (!q.ok) return;
+    const hit = q.value.find((h) => h.name === "legit");
+    expect(hit).toBeDefined();
+    expect(hit?.content).toBe("real content");
+    expect(hit?.type).toBe("fact");
+    // Caller metadata that didn't collide is preserved.
+    expect((hit?.metadata as { custom?: string })?.custom).toBe("kept");
+    // And the hijacked row name does NOT exist as a separate memory.
+    expect(q.value.find((h) => h.name === "evil")).toBeUndefined();
+
+    // Dedup-by-name must still work — second write replaces the first.
+    const w2 = await writeMemory(store, {
+      name: "legit",
+      content: "updated content",
+      metadata: { name: "evil-again" },
+    });
+    expect(w2.ok).toBe(true);
+    const q2 = await queryMemories(store, "updated content");
+    expect(q2.ok).toBe(true);
+    if (!q2.ok) return;
+    const legitRows = q2.value.filter((h) => h.name === "legit");
+    expect(legitRows.length).toBe(1);
+    expect(legitRows[0].content).toBe("updated content");
+
+    // Forget by the original name must succeed (would silently fail if the
+    // row had been stored under the hijacked name).
+    const f = await forgetMemory(store, "legit");
+    expect(f.ok).toBe(true);
+    const q3 = await queryMemories(store, "updated content");
+    expect(q3.ok).toBe(true);
+    if (!q3.ok) return;
+    expect(q3.value.find((h) => h.name === "legit")).toBeUndefined();
+  });
 });
 
 describe.skipIf(!PG_CONNECTION)(

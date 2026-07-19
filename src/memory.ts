@@ -57,9 +57,9 @@ const FILTER_BY_NAME = (name: string): VectorFilter => ({
 
 /**
  * Delete all rows matching a memory name. Backend-agnostic. Used by both
- * `forgetMemory` and the `writeMemory` dedup step. Returns the number of rows
- * deleted (best-effort: the vector store interface does not expose a count,
- * so this is always 0 — the caller should not rely on it).
+ * `forgetMemory` and the `writeMemory` dedup step. Returns no count — the
+ * vector store interface does not expose one, so callers treat the result as
+ * best-effort and re-query if they need to verify deletion.
  */
 export async function deleteByName(
   store: MastraVector,
@@ -126,13 +126,16 @@ export async function writeMemory(
     const vector = await embed(record.content);
     await deleteByName(store, record.name);
     const now = new Date().toISOString();
+    // System fields assigned LAST so caller-supplied metadata cannot collide
+    // with them — an adversarial `metadata:{name:"evil"}` would otherwise
+    // rebind the row's lookup key and break subsequent dedup/forget calls.
     const metadata = {
+      ...(record.metadata ?? {}),
       name: record.name,
       content: record.content,
       type: record.type ?? "fact",
       createdAt: now,
       updatedAt: now,
-      ...(record.metadata ?? {}),
     };
     await store.upsert({
       indexName: INDEX_NAME,

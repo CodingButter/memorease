@@ -42,6 +42,13 @@ type StoreHandle = { store: MastraVector };
 
 let handle: StoreHandle | undefined;
 let handleConfigFingerprint: string | undefined;
+// Negative cache: if schema bootstrap failed for this fingerprint, remember
+// the branded error and short-circuit subsequent calls. Without this, every
+// tool call against a persistently-down pg backend re-enters getStore,
+// re-runs ensureSchema, and stalls the agent for the full connection timeout.
+// The negative entry is cleared by _resetStoreForTests and on any successful
+// resolution after a config change.
+let handleError: { fingerprint: string; error: string } | undefined;
 
 function configFingerprint(ctx: PluginContext): string {
   const r = resolveConfig(ctx);
@@ -75,11 +82,26 @@ async function getStore(
     }
     return cached;
   }
+  // Negative cache: a prior call against this fingerprint failed schema
+  // bootstrap. Return the same branded error immediately — do NOT re-attempt
+  // (which would stall the agent for the connection timeout on every call).
+  if (handleError && handleError.fingerprint === fp) {
+    throw new Error(handleError.error);
+  }
   const resolved = resolveConfig(context);
-  const store = createVectorStore(resolved);
-  await ensureSchema(store);
+  let store: MastraVector;
+  try {
+    store = createVectorStore(resolved);
+    await ensureSchema(store);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const branded = `storage init failed — ${detail}. The session continues without memory; this error will repeat on every memory tool call until the underlying issue is fixed and the session is restarted.`;
+    handleError = { fingerprint: fp, error: branded };
+    throw new Error(branded);
+  }
   handle = { store };
   handleConfigFingerprint = fp;
+  handleError = undefined;
   if (toolCtx) {
     // Fire-and-forget — arming failures must not break the tool call. The
     // deliberate-memory core works without the provider.
@@ -96,6 +118,7 @@ async function getStore(
 export function _resetStoreForTests(): void {
   handle = undefined;
   handleConfigFingerprint = undefined;
+  handleError = undefined;
 }
 
 /**

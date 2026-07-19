@@ -13,7 +13,10 @@ import type { ResolvedConfig } from "./config.js";
  *        mastracode's settings.json when the host is configured for pg.
  *
  * Embeddings are stored in-row with metadata (single query = semantic rank +
- * relational filter). Dedup-by-name is achieved via `deleteFilter` on upsert.
+ * relational filter). Dedup-by-name uses explicit delete-then-insert via
+ * `deleteVectors({filter:{name:{$eq}}})` followed by `upsert()` — see
+ * `src/memory.ts` for the rationale (R1: `upsert({deleteFilter})` is silently
+ * ignored by LibSQLVector).
  */
 
 export const INDEX_NAME = "memorease_memories";

@@ -20,9 +20,6 @@ importers:
       '@mastra/libsql':
         specifier: ^1.16.0
         version: 1.16.0(@mastra/core@1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@3.25.76))(bufferutil@4.1.0)
-      '@mastra/memory':
-        specifier: ^1.23.0
-        version: 1.23.0(@mastra/core@1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)
       '@mastra/pg':
         specifier: ^1.16.0
         version: 1.16.0(@mastra/core@1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@3.25.76))
@@ -4712,22 +4709,6 @@ snapshots:
       - react-dom
       - supports-color
       - zod
-
-  '@mastra/memory@1.23.0(@mastra/core@1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)':
-    dependencies:
-      '@mastra/core': 1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@3.25.76)
-      '@mastra/schema-compat': 1.3.4(zod@4.4.3)
-      async-mutex: 0.5.0
-      diff: 8.0.4
-      image-size: 1.2.1
-      json-schema: 0.4.0
-      lru-cache: 11.5.2
-      probe-image-size: 7.3.0(supports-color@7.2.0)
-      tokenx: 1.3.0
-      xxhash-wasm: 1.1.0
-      zod: 4.4.3
-    transitivePeerDependencies:
-      - supports-color
 
   '@mastra/memory@1.23.0(@mastra/core@1.51.0(ai@6.0.230(zod@3.25.76))(bufferutil@4.1.0)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)':
     dependencies:

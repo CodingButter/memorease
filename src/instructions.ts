@@ -33,6 +33,7 @@ import {
   resolveCuratorModel,
   resolveInjectBudget,
 } from "./curator.js";
+import { failSoft, type StorageResult } from "./errors.js";
 
 const BOOT_TIMEOUT_DEFAULT_MS = 3000;
 
@@ -140,6 +141,21 @@ function renderStorageUnreachableSection(detail: string): string {
 }
 
 /**
+ * Fail-soft wrapper for `ensureSchema`. A throw here (CREATE INDEX permission
+ * failure, pg connection refused during describeIndex, libsql I/O error) is
+ * converted to a branded `{ok:false}` result so the boot IIFE never rejects.
+ * The branded message then propagates through `renderStorageUnreachableSection`
+ * with the real cause, rather than being discarded as an "unexpected bug".
+ */
+async function ensureSchemaOrFailSoft(
+  store: ReturnType<typeof createVectorStore>,
+): Promise<StorageResult<void>> {
+  return failSoft(async () => {
+    await ensureSchema(store);
+  });
+}
+
+/**
  * Boot memory injection. The plugin's `instructions(context)` delegates here.
  *
  * Flow:
@@ -153,20 +169,37 @@ function renderStorageUnreachableSection(detail: string): string {
  * AND no curator note is warranted).
  */
 export async function buildInstructions(context: PluginContext): Promise<string> {
-  const resolved = resolveConfig(context);
-  const store = createVectorStore(resolved);
+  // Resolve config + open the store OUTSIDE the fail-soft net of queryMemories,
+  // but inside our own: a sync throw from createVectorStore (e.g. libsql
+  // parent-dir race on a fresh system) or a reject from ensureSchema (pg
+  // CREATE INDEX permission failure, connection refused) must surface as a
+  // branded storage-unreachable section, not a rejected instructions() promise.
+  // The plugin contract is "never throws, never rejects" (JSDoc above).
+  let store: ReturnType<typeof createVectorStore> | undefined;
+  try {
+    const resolved = resolveConfig(context);
+    store = createVectorStore(resolved);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return renderStorageUnreachableSection(
+      `memorease: storage init failed — ${detail}.`,
+    );
+  }
 
   const modelId = resolveCuratorModel(context.config ?? {});
   const budget = resolveInjectBudget(
     (context.config as { injectBudget?: string } | undefined)?.injectBudget,
   );
 
-  // The boot query runs both ensureSchema and queryMemories inside the
-  // fail-soft net. If schema bootstrap or the query throws, queryMemories
-  // still returns a branded result rather than rejecting.
+  // The boot query runs both ensureSchema and queryMemories. Both are wrapped
+  // in failSoft (ensureSchema via ensureSchemaOrFailSoft below) so that a
+  // schema-bootstrap throw becomes a branded result rather than rejecting the
+  // IIFE — which in turn would otherwise hit the "rejected unexpectedly" arm
+  // and mislabel an actionable storage error as "a bug".
   const bootQuery = (async () => {
-    await ensureSchema(store);
-    return queryMemories(store, buildBootQuery(), {
+    const schema = await ensureSchemaOrFailSoft(store!);
+    if (!schema.ok) return schema;
+    return queryMemories(store!, buildBootQuery(), {
       topK: Math.ceil(budget / 200),
     });
   })();
@@ -179,8 +212,11 @@ export async function buildInstructions(context: PluginContext): Promise<string>
   }
   const queryResult = raced.value;
   if (!queryResult) {
+    // The boot IIFE rejected despite its internal try/catch — this is
+    // genuinely unexpected (every step is wrapped) and indicates a bug in
+    // our error handling rather than a user-actionable storage failure.
     return renderStorageUnreachableSection(
-      "Boot query rejected unexpectedly (this is a bug — please report).",
+      "Boot query rejected unexpectedly — this indicates a bug in memorease's error handling, not a storage issue. Please report.",
     );
   }
   if (!queryResult.ok) {

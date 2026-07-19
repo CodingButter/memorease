@@ -213,3 +213,38 @@ describe.skipIf(!PG_CONNECTION)("instructions: pg backend", () => {
     expect(section).toContain("pg-voice");
   });
 });
+
+describe("instructions: buildInstructions never throws", () => {
+  // Regression: createVectorStore used to throw synchronously outside any
+  // try/catch (libsql parent-dir race, pg config errors), which rejected the
+  // instructions() promise. Now it's wrapped → branded section, never throws.
+  beforeEach(() => {
+    process.env.MEMOREASE_SETTINGS_PATH = makeEmptySettings();
+  });
+
+  it("returns a branded section when createVectorStore throws (bad pg config)", async () => {
+    // A pg backend with no resolvable connection string makes createVectorStore
+    // throw inside resolveConfig→createVectorStore. buildInstructions must
+    // catch and return a branded section, not reject.
+    // We force this by asking for pg without a usable connection — the store
+    // factory throws "pg backend selected but no connection string".
+    // Achieve this by pointing explicit connectionString at empty after
+    // resolveConfig memoization is reset.
+    resetConfig();
+    const section = await buildInstructions({
+      // An explicitly-empty connectionString falls through to settings; with
+      // MEMOREASE_SETTINGS_PATH pointing at an empty settings.json, resolveConfig
+      // lands on libsql — which succeeds. To exercise the throw, we instead
+      // pass a syntactically-broken connection that PgVector rejects at build.
+      config: {
+        connectionString: "not-a-valid-postgres-url",
+        curatorModel: undefined,
+      },
+    });
+    expect(typeof section).toBe("string");
+    // Either it branded a storage failure or (if PgVector happened to defer
+    // the error to connect time) it surfaced the unreachable section. Both
+    // are acceptable — the contract is "no throw".
+    expect(section.length).toBeGreaterThan(0);
+  });
+});

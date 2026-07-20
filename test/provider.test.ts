@@ -12,6 +12,7 @@ import {
   extractRecentUserText,
   hintBody,
   TAP_THRESHOLD,
+  TAP_DEDUP_MS,
   createMemoreaseProvider,
   type ProbeState,
   type TapStatus,
@@ -343,6 +344,84 @@ describe("provider: probeSubscriber", () => {
     expect(r1).toBe("notified");
     expect(r2).toBe("skipped-deduped");
     expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("progress gate: idle conversation never re-taps, even after the dedup window", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "same-hit" } },
+    ]);
+    const notify = async (body: string) => {
+      notifyCalls.push({ body, sub: SUB });
+    };
+
+    const r1 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Simulate the dedup window having long expired — but no new user text.
+    const rec = state.lastNotifiedPerThread.get(SUB.threadId)!;
+    rec.at = Date.now() - TAP_DEDUP_MS * 10;
+    const r2 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("skipped-deduped");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("progress gate: new user text after the window re-taps", async () => {
+    let text = "hello";
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: text }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "same-hit" } },
+    ]);
+    const notify = async (body: string) => {
+      notifyCalls.push({ body, sub: SUB });
+    };
+
+    const r1 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Conversation moved AND the dedup window expired.
+    text = "now talking about something new";
+    const rec = state.lastNotifiedPerThread.get(SUB.threadId)!;
+    rec.at = Date.now() - TAP_DEDUP_MS * 10;
+    const r2 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("notified");
+    expect(notifyCalls).toHaveLength(2);
   });
 
   it("skips when recall returns no usable text", async () => {

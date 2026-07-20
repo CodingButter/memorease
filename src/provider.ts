@@ -113,8 +113,15 @@ export const EXTERNAL_RESOURCE_ID = "memorease:global";
 
 /** Mutable probe state — owned by the provider, passed to `probeSubscriber`. */
 export type ProbeState = {
-  /** threadId → { name, at } last notification, for dedup. */
-  lastNotifiedPerThread: Map<string, { name: string; at: number }>;
+  /**
+   * threadId → last notification, for dedup. `text` is the recent user text
+   * at notify time: an idle conversation (no new user input) never re-taps,
+   * no matter how much time passes.
+   */
+  lastNotifiedPerThread: Map<
+    string,
+    { name: string; at: number; text: string }
+  >;
   lastPollAt?: number;
   lastError?: string;
   /** Reason the provider is currently disarmed, if any. */
@@ -277,11 +284,17 @@ export async function probeSubscriber(
     );
     if (eligible.length === 0) return "skipped-below-threshold";
 
-    // Dedup keys on the top hit: if the strongest resonance hasn't changed
-    // within the window, the gut feeling hasn't either.
     const name = String(eligible[0].metadata?.name ?? "");
     const now = Date.now();
     const last = state.lastNotifiedPerThread.get(sub.threadId);
+    // Progress gate: a gut feeling reacts to what's happening. If no new
+    // user text has arrived since the last tap, nothing has happened — stay
+    // silent indefinitely, don't drip the same hint every dedup window.
+    if (last && last.text === recent) {
+      return "skipped-deduped";
+    }
+    // Resonance dedup: the conversation moved but the strongest hit is the
+    // same — the feeling hasn't changed, wait out the window.
     if (last && last.name === name && now - last.at < TAP_DEDUP_MS) {
       return "skipped-deduped";
     }
@@ -291,7 +304,7 @@ export async function probeSubscriber(
       score: h.score,
     }));
     await notify(hintBody(starters), sub);
-    state.lastNotifiedPerThread.set(sub.threadId, { name, at: now });
+    state.lastNotifiedPerThread.set(sub.threadId, { name, at: now, text: recent });
     state.notifiedCount += 1;
     return "notified";
   } catch (err) {

@@ -2,18 +2,21 @@
 
 **Durable semantic memory for [MastraCode](https://github.com/mastra-cloud/mastracode) — as a plugin.**
 
-Opt-in, inspectable, self-hosted, and removable. Memory that survives across
-sessions and across machines, without the always-on opacity of an internal
-memory engine.
+Opt-in, inspectable, self-hosted, and removable. A deliberate knowledge store
+that survives across sessions and across machines.
 
 ---
 
 ## Why
 
-MastraCode ships with an internal memory engine. It's useful, but it's opaque:
-you can't easily see what's been remembered, you can't edit it, and the moment
-you uninstall or change tools the memory goes with it. memorease takes a
-different stance:
+MastraCode's built-in memory is **observational**: an observer model compacts
+the running conversation into observations, and a recall tool pages back
+through prior messages. That solves *continuity* — long sessions stay coherent
+and past exchanges stay reachable — but it isn't a knowledge base. It's
+automatic (the agent doesn't decide what's worth keeping), conversation-shaped
+(facts stay buried in session history), and not something you can deliberately
+write a fact to, query semantically, or inspect and edit as data. memorease
+adds that missing layer:
 
 - **Memory is a tool.** The agent decides when to remember and what to look
   up. Nothing happens behind its back.

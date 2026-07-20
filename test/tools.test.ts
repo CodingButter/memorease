@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
-import { buildTools, _resetStoreForTests } from "../src/tools.js";
+import { buildTools, resolveSkillsDir, _resetStoreForTests } from "../src/tools.js";
 import * as toolsNS from "../src/tools.js";
 import type { MastraCodePluginContext } from "mastracode/plugin";
 import {
@@ -29,10 +29,11 @@ const PG_CONNECTION = process.env.MEMOREASE_PG_TEST_CONNECTION;
 
 function makeContext(
   overrides: Partial<MastraCodePluginContext["config"]> & { skillsDir?: string } = {},
+  ctxOverrides: { scope?: string; cwd?: string } = {},
 ): MastraCodePluginContext {
   return {
-    cwd: process.cwd(),
-    scope: "test",
+    cwd: ctxOverrides.cwd ?? process.cwd(),
+    scope: ctxOverrides.scope ?? "test",
     pluginDir: process.cwd(),
     config: {
       connectionString: "",
@@ -87,6 +88,42 @@ beforeEach(async () => {
 afterEach(() => {
   resetConfig();
   _resetStoreForTests();
+});
+
+describe("resolveSkillsDir: scope-aware anchoring", () => {
+  it("defaults to ~/.agents/skills at global scope", () => {
+    expect(resolveSkillsDir("", { scope: "global" })).toBe(
+      join(homedir(), ".agents", "skills"),
+    );
+    // No scope at all behaves like global (backwards compatible).
+    expect(resolveSkillsDir(undefined)).toBe(
+      join(homedir(), ".agents", "skills"),
+    );
+  });
+
+  it("defaults to <projectRoot>/.agents/skills at project scope", () => {
+    expect(resolveSkillsDir("", { scope: "project", cwd: "/repo/game" })).toBe(
+      join("/repo/game", ".agents", "skills"),
+    );
+  });
+
+  it("resolves relative skillsDir against the scope anchor", () => {
+    expect(
+      resolveSkillsDir("custom/skills", { scope: "project", cwd: "/repo/game" }),
+    ).toBe(join("/repo/game", "custom", "skills"));
+    expect(resolveSkillsDir("custom/skills", { scope: "global" })).toBe(
+      join(homedir(), "custom", "skills"),
+    );
+  });
+
+  it("takes absolute skillsDir as-is in either scope", () => {
+    expect(
+      resolveSkillsDir("/abs/skills", { scope: "project", cwd: "/repo/game" }),
+    ).toBe("/abs/skills");
+    expect(resolveSkillsDir("/abs/skills", { scope: "global" })).toBe(
+      "/abs/skills",
+    );
+  });
 });
 
 describe("tools: libsql backend", () => {
@@ -191,6 +228,40 @@ describe("tools: libsql backend", () => {
     );
     expect(skillRow).toBeDefined();
     expect(skillRow?.type).toBe("skill");
+  });
+
+  it("memory_distill_skill writes into <projectRoot>/.agents/skills at project scope", async () => {
+    await writeMemory(store, {
+      name: "team-api-conventions",
+      content: "This project uses REST with cursor pagination.",
+    });
+
+    // Empty skillsDir + project scope: skills land inside the project root,
+    // where mastracode scans `.agents/skills` — commit the dir and the team
+    // shares distilled skills on the next pull.
+    const tools = buildTools(
+      makeContext({ skillsDir: "" }, { scope: "project", cwd: tmpDir }),
+    );
+
+    const res = await execOf(tools.memory_distill_skill)(
+      {
+        slug: "api-conventions",
+        fromNames: ["team-api-conventions"],
+        summary: "API conventions for this project.",
+        instructions: "Use REST with cursor pagination for all new endpoints.",
+      },
+      {},
+    );
+    expect(res.ok).toBe(true);
+
+    const skillPath = join(
+      tmpDir,
+      ".agents",
+      "skills",
+      "api-conventions",
+      "SKILL.md",
+    );
+    expect(existsSync(skillPath)).toBe(true);
   });
 
   it("memory_distill_skill rejects an invalid slug (no throw)", async () => {

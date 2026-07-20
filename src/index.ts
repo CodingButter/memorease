@@ -60,7 +60,7 @@ export default defineMastraCodePlugin({
       type: "string",
       label: "Skills directory",
       description:
-        "Where memory_distill_skill writes SKILL.md. Empty = ~/.agents/skills.",
+        "Where memory_distill_skill writes SKILL.md. Empty = .agents/skills under the scope root (~ for global installs, the project root for project installs).",
       default: "",
     },
   },

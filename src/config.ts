@@ -27,6 +27,7 @@ export type PluginScope = "global" | "project";
  */
 export type PluginContext = {
   scope?: PluginScope;
+  cwd?: string;
   config?: {
     connectionString?: string;
     curatorModel?: string;
@@ -96,12 +97,18 @@ function pgConnectionStringFromSettings(
 }
 
 /**
- * Default libsql file URL. Honors MEMOREASE_LIBSQL_PATH (tests) and falls back
- * to the user's data dir.
+ * Default libsql file URL. Honors MEMOREASE_LIBSQL_PATH (tests). Scope-aware
+ * anchoring (same rule as the skills dir): a PROJECT install gets its own DB
+ * under `<projectRoot>/.mastracode/memorease/` — sharing the user-level file
+ * would silently mix personal and project memories. GLOBAL installs keep the
+ * user's data dir.
  */
-function defaultLibsqlUrl(): string {
+function defaultLibsqlUrl(projectRoot?: string): string {
   const override = process.env.MEMOREASE_LIBSQL_PATH;
   if (override) return override.startsWith("file:") ? override : `file:${override}`;
+  if (projectRoot) {
+    return `file:${join(projectRoot, ".mastracode", "memorease", "memorease-vectors.db")}`;
+  }
   return `file:${join(homedir(), ".local", "share", "memorease", "memorease-vectors.db")}`;
 }
 
@@ -113,9 +120,14 @@ let cached: ResolvedConfig | undefined;
  *
  * Resolution order:
  *  1. Explicit `connectionString` in plugin config → `pg` with that string.
- *  2. mastracode settings.json `storage.backend === "pg"` with a usable
- *     connection → `pg` (shared DB).
- *  3. Otherwise → `libsql` default.
+ *  2. GLOBAL scope only: mastracode settings.json `storage.backend === "pg"`
+ *     with a usable connection → `pg` (shared DB).
+ *  3. Otherwise → `libsql` default (project-local file at project scope).
+ *
+ * A PROJECT install never inherits the user's settings.json storage: that
+ * connection is the user's personal store, and a project store falling back
+ * to it would silently mix project memories into it. Project scope without
+ * an explicit connectionString means a project-local libsql file.
  */
 export function resolveConfig(context: PluginContext): ResolvedConfig {
   if (cached) return cached;
@@ -126,16 +138,25 @@ export function resolveConfig(context: PluginContext): ResolvedConfig {
     return cached;
   }
 
-  const settings = readMastracodeSettings();
-  if (settings) {
-    const shared = pgConnectionStringFromSettings(settings);
-    if (shared) {
-      cached = { backend: "pg", connectionString: shared };
-      return cached;
+  const project = context.scope === "project";
+
+  if (!project) {
+    const settings = readMastracodeSettings();
+    if (settings) {
+      const shared = pgConnectionStringFromSettings(settings);
+      if (shared) {
+        cached = { backend: "pg", connectionString: shared };
+        return cached;
+      }
     }
   }
 
-  cached = { backend: "libsql", libsqlUrl: defaultLibsqlUrl() };
+  cached = {
+    backend: "libsql",
+    libsqlUrl: defaultLibsqlUrl(
+      project ? (context.cwd ?? process.cwd()) : undefined,
+    ),
+  };
   return cached;
 }
 

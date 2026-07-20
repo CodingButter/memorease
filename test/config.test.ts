@@ -121,6 +121,45 @@ describe("resolveConfig", () => {
     expect(cfg.connectionString).toBe("postgresql://from-config");
   });
 
+  it("project scope + no connection → project-local libsql under .mastracode/memorease", () => {
+    const cfg = resolveConfig({
+      scope: "project",
+      cwd: "/repo/game",
+      config: { connectionString: "" },
+    });
+    expect(cfg.backend).toBe("libsql");
+    expect(cfg.libsqlUrl).toBe(
+      "file:" +
+        join("/repo/game", ".mastracode", "memorease", "memorease-vectors.db"),
+    );
+  });
+
+  it("project scope never inherits settings.json pg (no silent personal-store fallback)", () => {
+    withSettings(tmpHome, {
+      storage: {
+        backend: "pg",
+        connectionString: "postgresql://personal:pw@db.internal:5432/mastra",
+      },
+    });
+    const cfg = resolveConfig({
+      scope: "project",
+      cwd: "/repo/game",
+      config: {},
+    });
+    expect(cfg.backend).toBe("libsql");
+    expect(cfg.libsqlUrl).toContain(join("/repo/game", ".mastracode"));
+  });
+
+  it("project scope + explicit connectionString → pg (team store)", () => {
+    const cfg = resolveConfig({
+      scope: "project",
+      cwd: "/repo/game",
+      config: { connectionString: "postgresql://team:pw@host:5432/game" },
+    });
+    expect(cfg.backend).toBe("pg");
+    expect(cfg.connectionString).toBe("postgresql://team:pw@host:5432/game");
+  });
+
   it("MEMOREASE_LIBSQL_PATH override honored", () => {
     process.env.MEMOREASE_LIBSQL_PATH = "/tmp/custom/path.db";
     const cfg = resolveConfig({ config: {} });

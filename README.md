@@ -117,9 +117,18 @@ two tested backends for free with a single code path:
 Resolution order:
 
 1. Explicit `connectionString` in plugin config → **pg** with that string.
-2. MastraCode `settings.json` has `storage.backend === "pg"` with a usable
-   connection → **pg** with mastracode's own Postgres (shared DB).
-3. Otherwise → **libsql** default.
+2. Global installs only: MastraCode `settings.json` has
+   `storage.backend === "pg"` with a usable connection → **pg** with
+   mastracode's own Postgres (shared DB).
+3. Otherwise → **libsql** default. Global installs use
+   `~/.local/share/memorease/`; project installs get their own file under
+   `<projectRoot>/.mastracode/memorease/` (keep `.mastracode/` gitignored —
+   a binary SQLite file doesn't belong in the repo; team sharing is what the
+   Postgres `connectionString` is for).
+
+A project-scoped install never silently inherits your personal store:
+without an explicit `connectionString` it gets a project-local database,
+not the user-level file or your settings.json Postgres.
 
 ### Embeddings
 

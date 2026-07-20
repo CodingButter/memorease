@@ -29,15 +29,23 @@ different stance:
 
 ### Option A — Zero-config local SQLite (default)
 
-```bash
-mastracode plugin install github:CodingButter/memorease
+Inside MastraCode, run the `/plugins` command, choose **Install new plugin** →
+**GitHub URL**, and paste:
+
 ```
+https://github.com/CodingButter/memorease
+```
+
+Pick a scope (global or project) and confirm. GitHub-installed plugins
+auto-update from the repository. (For a local checkout, choose **Local path**
+instead and point at the cloned directory.) Restart MastraCode after install —
+plugins are not hot-loaded.
 
 That's it. memorease creates a SQLite file at
 `~/.local/share/memorease/memorease-vectors.db` on first use, uses
 [`@mastra/fastembed`](https://github.com/mastra-org/fastembed-js) for on-device
 384-dim embeddings (no API keys, ~50MB ONNX model downloads on first call), and
-falls back to vector-similarity ranking for the boot memories section.
+ranks the boot memories section by vector similarity.
 
 ### Option B — Postgres (shared / fleet / scaled)
 
@@ -66,7 +74,7 @@ schema and are editable from the TUI.
 | Key               | Type     | Default        | Meaning                                                                                                                                                  |
 | ----------------- | -------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `connectionString`| string   | `""`           | Postgres connection string. Empty = auto-detect (see [Storage backends](#storage-backends)).                                                             |
-| `curatorModel`    | `model`  | `""`           | LLM used to rank which memories earn system-prompt space at boot. Empty = auto-default to mastracode's configured observer model; if that's empty, vector-similarity ranking. |
+| `curatorModel`    | `model`  | `""`           | LLM used by the background curation signal (fires after boot; see [Boot injection](#boot-injection--background-curation)). Empty = auto-default to mastracode's configured observer model; if that's empty too, curation is disarmed and boot ranking stays pure vector-similarity. |
 | `injectBudget`    | string   | `"1200"`       | Approximate character budget for the injected `## Memories` section. Coerced to int and clamped to 200–8000.                                             |
 | `skillsDir`       | string   | `""` (`~/.agents/skills`) | Where `memory_distill_skill` writes `SKILL.md` files.                                                                                                  |
 
@@ -115,22 +123,37 @@ Resolution order:
 [`@mastra/fastembed`](https://github.com/mastra-org/fastembed-js) with the
 `fastembed.small` model (384-dim, local ONNX). No API keys, no third-party
 calls, no embedder config option. The first call downloads the ONNX weights
-(~50MB); subsequent calls hit a local cache.
+(~50MB); subsequent calls hit a local cache. The heavy imports (onnxruntime,
+fastembed, the vector backend) are all lazy — deferred off the plugin's module
+load, so session boot stays fast.
 
 > **Why is the embedder not configurable?** Mixing embedding models inside one
 > store produces meaningless similarity scores. One store, one embedding space,
 > one obvious default — keeps the memory index coherent and the config surface
 > small.
 
-### Curator ranking
+### Boot injection & background curation
 
-At session boot, memorease pulls candidate memories, ranks them, and injects
-the top ones into the system prompt as a `## Memories` section. The ranking
-model ("curator") follows this resolution chain:
+At session boot, `instructions()` injects two things into the system prompt:
+
+1. **A behavioral directive** — a short contract telling the agent when to
+   query, write, and distill (query on instinct, write on learn, distill when
+   recurring), plus admission criteria for what belongs in a global store.
+   This is injected even when the store is empty, so a fresh session knows
+   memorease exists.
+2. **A `## Memories` section** — candidate memories ranked by pure
+   vector-similarity (top-k by cosine), truncated to `injectBudget`.
+
+**No LLM runs on the boot path.** Boot is a single embed + vector query with a
+3s timeout (override: `MEMOREASE_BOOT_TIMEOUT_MS`), keeping session startup
+fast. The LLM pass ("curator") fires later as a one-shot **background signal**:
+on the signal provider's first poll after arming, the curator re-ranks
+candidates and delivers its selection through the notification inbox. The
+curator model resolves through this chain:
 
 1. Explicit `curatorModel` in plugin config.
 2. MastraCode `settings.json → models.observerModelOverride`.
-3. **Disarmed** — pure vector-similarity ranking (top-k by cosine).
+3. **Disarmed** — no background curation; boot's similarity ranking stands.
 
 The armed path issues a single `doGenerate` call with a fixed selection prompt
 and a character budget (`injectBudget`). Credentials are handled by
@@ -147,28 +170,41 @@ returns a branded `{"ok": false, "error": "memorease: ..."}` result on:
 - embedder failure (ONNX load errors, model corruption)
 - storage errors (malformed queries, missing index despite `ensureSchema`)
 
-The `## Memories` boot section likewise degrades to a branded
-`## Memories: unavailable` line if the store can't be reached within a 3s
-timeout (covers both slow-DB timeouts and fast-reject `ECONNREFUSED`).
+The boot injection likewise degrades to a branded `## Memorease` /
+"Storage unreachable — memory disabled this session" section if the store
+can't be reached within a 3s timeout (covers both slow-DB timeouts and
+fast-reject `ECONNREFUSED`).
 
 ### Experimental: the "gut-feeling" signal provider
 
 memorease ships a `MemoreaseSignalProvider` built on the official
-[`SignalProvider`](https://github.com/mastra-org/mastra) surface. On every
-poll (default 30s) the provider:
+[`SignalProvider`](https://github.com/mastra-org/mastra) surface. It arms on
+the first memory tool call (which also subscribes the calling thread) and
+polls every 30s. Each poll:
 
-1. Recalls the latest user message from the active thread via
-   `agent.memory.recall(...)`.
+1. Recalls recent conversation text from the active thread via the agent's
+   memory (`agent.memory` or `agent.getMemory()`).
 2. Embeds it and queries the store.
-3. If the top hit scores above `TAP_THRESHOLD` (cosine ≥ 0.5) **and** this
-   thread hasn't been notified about that same memory within `TAP_DEDUP_MS`
-   (5 minutes), it fires a notification suggesting the agent call
-   `memory_query`.
+3. Fires a "gut feeling" notification when a hit clears the gates below.
+
+A tap must pass **three gates** before it fires:
+
+- **Score** — the top hit must score cosine ≥ 0.5. The score also sets the
+  notification priority: ≥ 0.80 → `high`, ≥ 0.65 → `medium`, ≥ 0.50 → `low`.
+- **Provenance** — memories written *by the current thread* are skipped
+  (that knowledge is already in context; re-surfacing it is noise).
+- **Progress** — if no new user text has arrived since the last notification
+  and the top hit is unchanged, the tap stays silent. Plus a hard dedup:
+  the same memory won't re-notify the same thread within 5 minutes.
+
+The notification is deliberately a **door, not a document**: it names a couple
+of starting-point memories and invites the agent to `memory_query` with terms
+from the live conversation, rather than pasting one memory as "the answer".
 
 The provider never writes to memory as a side-channel — it just nudges the
-agent to look. It arms on the first memory tool call and disarms cleanly on
-every failure shape (no `memory.recall`, no `sendNotificationSignal`, throwing
-agent, etc.).
+agent to look. It disarms cleanly on every failure shape (no memory access, no
+`sendNotificationSignal`, throwing agent, etc.). The one-shot boot-curation
+signal (see above) rides the same provider and always fires at `low` priority.
 
 **Why "experimental"?** The provider relies on agent-instance methods that
 MastraCode exposes but doesn't formally document for plugin use. If a future
@@ -224,6 +260,9 @@ bash .mastracode/plans/memorease.proof/run-local.sh   # libsql demo → transcri
 
 - **Fleet memory sharing** — first-class multi-machine story (today: works
   through shared Postgres, but there's no built-in sync for the libsql path).
+- **Optional remote embedding provider** — an opt-in API-based embedder
+  (local fastembed stays the default). Requires a dimension-migration story,
+  since embeddings from different models can't share one index.
 - **Upstream `resolveModel`** — currently imported from
   `@mastra/code-sdk/agents/model`. If mastracode promotes this to a public
   plugin-context API, memorease will move to it.

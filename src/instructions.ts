@@ -3,8 +3,9 @@
  *
  * At session start, mastracode calls `instructions(context)` and prepends the
  * returned string to the system prompt. This module builds a `## Memories`
- * section from whatever's in the store, ranked by the curator if armed or by
- * vector similarity otherwise, and never throws — every await is wrapped so a
+ * section from whatever's in the store, ranked by vector similarity (the
+ * curator LLM fires later as a background signal — see provider.ts),
+ * and never throws — every await is wrapped so a
  * storage failure surfaces as a short branded note instead of crashing the
  * session.
  *

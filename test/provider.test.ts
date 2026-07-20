@@ -11,8 +11,11 @@ import {
   extractText,
   extractRecentUserText,
   hintBody,
+  tapPriority,
   TAP_THRESHOLD,
   TAP_DEDUP_MS,
+  TAP_MEDIUM_THRESHOLD,
+  TAP_HIGH_THRESHOLD,
   createMemoreaseProvider,
   type ProbeState,
   type TapStatus,
@@ -140,6 +143,16 @@ describe("provider: text extraction", () => {
   it("extractRecentUserText returns empty for empty list", () => {
     expect(extractRecentUserText([])).toBe("");
     expect(extractRecentUserText(undefined)).toBe("");
+  });
+
+  it("tapPriority maps score to signal level, never urgent", () => {
+    expect(tapPriority(TAP_THRESHOLD)).toBe("low");
+    expect(tapPriority(TAP_MEDIUM_THRESHOLD - 0.01)).toBe("low");
+    expect(tapPriority(TAP_MEDIUM_THRESHOLD)).toBe("medium");
+    expect(tapPriority(TAP_HIGH_THRESHOLD - 0.01)).toBe("medium");
+    expect(tapPriority(TAP_HIGH_THRESHOLD)).toBe("high");
+    expect(tapPriority(0.99)).toBe("high");
+    expect(tapPriority(1)).toBe("high");
   });
 
   it("hintBody is a door, not a document: hints at exploration, never content", () => {
@@ -344,6 +357,48 @@ describe("provider: probeSubscriber", () => {
     expect(r1).toBe("notified");
     expect(r2).toBe("skipped-deduped");
     expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("passes score-derived priority to notify: strong hit taps high, borderline taps low", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const priorities: string[] = [];
+    const notify = async (
+      _body: string,
+      _sub: unknown,
+      priority: string,
+    ) => {
+      priorities.push(priority);
+    };
+
+    // Strong resonance → high.
+    await probeSubscriber(
+      () => agent,
+      makeMockStore([
+        { score: TAP_HIGH_THRESHOLD + 0.05, metadata: { name: "strong" } },
+      ]) as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Borderline resonance (different thread state) → low.
+    const state2 = newProbeState();
+    await probeSubscriber(
+      () => agent,
+      makeMockStore([
+        { score: TAP_THRESHOLD + 0.01, metadata: { name: "borderline" } },
+      ]) as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state2,
+      notify,
+    );
+
+    expect(priorities).toEqual(["high", "low"]);
   });
 
   it("progress gate: idle conversation never re-taps, even after the dedup window", async () => {

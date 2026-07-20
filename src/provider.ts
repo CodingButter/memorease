@@ -40,6 +40,30 @@ export type TapStatus =
 export const TAP_THRESHOLD = 0.5;
 /** Per-thread dedup window: same top hit within this window does not re-notify. */
 export const TAP_DEDUP_MS = 5 * 60 * 1000;
+
+/** Signal priority — mirrors mastracode's NotificationPriority levels. */
+export type SignalPriority = "low" | "medium" | "high" | "urgent";
+
+/**
+ * Similarity score above which a tap is considered strong enough to warrant
+ * delivery into an active conversation rather than waiting in the inbox.
+ */
+export const TAP_MEDIUM_THRESHOLD = 0.65;
+/** Score above which the resonance is strong enough to interrupt idle. */
+export const TAP_HIGH_THRESHOLD = 0.8;
+
+/**
+ * Map the strongest hit's similarity score to a signal priority. The
+ * delivery pipeline treats priority as "does this wake an idle thread or
+ * wait for the next message" — so the tap's importance estimate IS the
+ * score. "urgent" is deliberately never produced: a cosine similarity is
+ * an informed hunch, not an emergency.
+ */
+export function tapPriority(score: number): SignalPriority {
+  if (score >= TAP_HIGH_THRESHOLD) return "high";
+  if (score >= TAP_MEDIUM_THRESHOLD) return "medium";
+  return "low";
+}
 /** Default poll interval if none provided. */
 export const DEFAULT_POLL_MS = 30_000;
 /** How many recent messages to pull from each thread per poll. */
@@ -250,7 +274,11 @@ export async function probeSubscriber(
   embedFn: (text: string) => Promise<number[]>,
   sub: SubLike,
   state: ProbeState,
-  notify: (body: string, sub: SubLike) => Promise<void>,
+  notify: (
+    body: string,
+    sub: SubLike,
+    priority: SignalPriority,
+  ) => Promise<void>,
 ): Promise<"notified" | "skipped-below-threshold" | "skipped-deduped" | "skipped-no-text" | "disarmed-no-memory" | "error"> {
   try {
     const memory = await resolveMemory(getAgent());
@@ -303,7 +331,7 @@ export async function probeSubscriber(
       name: String(h.metadata?.name ?? ""),
       score: h.score,
     }));
-    await notify(hintBody(starters), sub);
+    await notify(hintBody(starters), sub, tapPriority(eligible[0].score));
     state.lastNotifiedPerThread.set(sub.threadId, { name, at: now, text: recent });
     state.notifiedCount += 1;
     return "notified";
@@ -475,6 +503,7 @@ export function createMemoreaseProvider({
       kind: string,
       body: string,
       target: SubLike,
+      priority: SignalPriority = "low",
     ): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const self = this as any;
@@ -483,7 +512,7 @@ export function createMemoreaseProvider({
           source: "memorease",
           kind,
           summary: body,
-          priority: "low",
+          priority,
         },
         { threadId: target.threadId, resourceId: target.resourceId },
       );
@@ -524,7 +553,8 @@ export function createMemoreaseProvider({
           embedImpl,
           sub,
           state,
-          (body, target) => this.sendSignal("gut-feeling", body, target),
+          (body, target, priority) =>
+            this.sendSignal("gut-feeling", body, target, priority),
         );
       }
     }

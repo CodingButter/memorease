@@ -21,7 +21,7 @@
 import { hostname } from "node:os";
 import { basename } from "node:path";
 
-import { resolveConfig, type PluginContext } from "./config.ts";
+import { resolveConfig, type PluginContext, type PluginScope } from "./config.ts";
 import {
   createVectorStore,
   ensureSchema,
@@ -46,33 +46,57 @@ const BOOT_TIMEOUT_DEFAULT_MS = 3000;
  *
  * Without this, a session that boots into an empty store gets an empty
  * instruction string and never discovers the memory tools, which is the bug
- * this constant exists to close: the agent must be told to QUERY ON INSTINCT
+ * this function exists to close: the agent must be told to QUERY ON INSTINCT
  * or it will answer "I don't know" without ever checking memory.
+ *
+ * Scope-aware: the admission test inverts with install scope. A GLOBAL store
+ * holds cross-project knowledge (project-local details are noise there); a
+ * PROJECT store holds exactly that project knowledge — and may be shared with
+ * teammates, so personal user facts move to the exclusion list instead.
+ * Session-in-progress state is excluded in both scopes.
  */
-const MEMOREASE_DIRECTIVE = [
-  "## Memorease — Global Knowledge Layer",
-  "",
-  "Memorease is your persistent store for knowledge that outlives the current session: facts about the user, lessons learned, recurring patterns, cross-project context, durable preferences, distilled skills. The admission test: would this help tomorrow, on a different project, or with a different question? If yes, it belongs here.",
-  "",
-  "Three behaviors, all required:",
-  "",
-  '1. QUERY ON INSTINCT. Any time you have a flicker of "I might know something about this" — a personal question, a tooling choice, an error pattern, a user preference, a past decision — run `memory_query` BEFORE you answer. A missed query when memory had the answer is a bug. "I don\'t know / I can\'t do that" is never final until you\'ve checked memory.',
-  "",
-  "2. WRITE ON LEARN. The moment a durable fact lands — a preference, an infra detail, a decision and its rationale, a lesson worth carrying forward — write it to memorease immediately via `memory_write`. Don't batch. If you find yourself doing the same thing across sessions, that's the signal to write it.",
-  "",
-  "3. DISTILL WHEN RECURRING. When a cluster of memories becomes a repeatable workflow, use `memory_distill_skill` to fold it into a skill. Skills make the knowledge active, not just retrievable.",
-  "",
-  "What does NOT belong — never write these:",
-  "- SECRETS. Passwords, API keys, tokens, credentials — never, in any form, regardless of trust level. Store WHERE a credential lives (a path, a vault name), never the credential itself.",
-  "- Task-in-progress state. A bug you're mid-fixing, a build you're waiting on, a session's working notes — that's thread context, not knowledge.",
-  "- Project-local details. Specific file paths, one-off bugs, code that lives in the repo anyway.",
-  "- Anything cheaply recomputed. Directory listings, versions, things one command re-derives.",
-  "",
-  "Hygiene — the store is read on every recall, so every entry costs context:",
-  "- One fact per name. Before writing, `memory_query` for near-duplicates; UPDATE the existing name instead of writing a sibling.",
-  "- When a fact changes or resolves, rewrite the memory to the new durable truth (or `memory_forget` it). A memory describing a resolved situation in past tense is rot.",
-  "- Keep entries compact. Capture the durable core and the why; leave the play-by-play in the thread.",
-].join("\n");
+export function memoreaseDirective(scope: PluginScope = "global"): string {
+  const project = scope === "project";
+
+  const header = project
+    ? "## Memorease — Project Knowledge Layer"
+    : "## Memorease — Global Knowledge Layer";
+
+  const intro = project
+    ? "Memorease here is scoped to THIS PROJECT — and the store may be shared with teammates. It holds knowledge about the project that outlives the current session: architecture decisions and their rationale, conventions, gotchas, domain knowledge, lessons learned in this codebase. The admission test: would this help tomorrow, in another session, or a teammate working on this project? If yes, it belongs here."
+    : "Memorease is your persistent store for knowledge that outlives the current session: facts about the user, lessons learned, recurring patterns, cross-project context, durable preferences, distilled skills. The admission test: would this help tomorrow, on a different project, or with a different question? If yes, it belongs here.";
+
+  const exclusions = [
+    "What does NOT belong — never write these:",
+    "- SECRETS. Passwords, API keys, tokens, credentials — never, in any form, regardless of trust level. Store WHERE a credential lives (a path, a vault name), never the credential itself.",
+    "- Session-in-progress state. A bug you're mid-fixing, a build you're waiting on, a session's working notes — that's thread context, not knowledge.",
+    project
+      ? "- Personal or off-project knowledge. User preferences, other projects, general lessons — those belong in a global-scope store, not a project store other people may read."
+      : "- Project-local details. Specific file paths, one-off bugs, code that lives in the repo anyway.",
+    "- Anything cheaply recomputed. Directory listings, versions, things one command re-derives.",
+  ];
+
+  return [
+    header,
+    "",
+    intro,
+    "",
+    "Three behaviors, all required:",
+    "",
+    '1. QUERY ON INSTINCT. Any time you have a flicker of "I might know something about this" — a personal question, a tooling choice, an error pattern, a user preference, a past decision — run `memory_query` BEFORE you answer. A missed query when memory had the answer is a bug. "I don\'t know / I can\'t do that" is never final until you\'ve checked memory.',
+    "",
+    "2. WRITE ON LEARN. The moment a durable fact lands — a preference, an infra detail, a decision and its rationale, a lesson worth carrying forward — write it to memorease immediately via `memory_write`. Don't batch. If you find yourself doing the same thing across sessions, that's the signal to write it.",
+    "",
+    "3. DISTILL WHEN RECURRING. When a cluster of memories becomes a repeatable workflow, use `memory_distill_skill` to fold it into a skill. Skills make the knowledge active, not just retrievable.",
+    "",
+    ...exclusions,
+    "",
+    "Hygiene — the store is read on every recall, so every entry costs context:",
+    "- One fact per name. Before writing, `memory_query` for near-duplicates; UPDATE the existing name instead of writing a sibling.",
+    "- When a fact changes or resolves, rewrite the memory to the new durable truth (or `memory_forget` it). A memory describing a resolved situation in past tense is rot.",
+    "- Keep entries compact. Capture the durable core and the why; leave the play-by-play in the thread.",
+  ].join("\n");
+}
 
 function bootTimeoutMs(): number {
   const raw = Number.parseInt(process.env.MEMOREASE_BOOT_TIMEOUT_MS ?? "", 10);
@@ -301,9 +325,8 @@ export async function buildInstructions(
     // will answer "I don't know" without ever querying. Append the
     // disarmed-curator note if applicable.
     const note = curatorNote(context.config ?? {});
-    return note
-      ? `${MEMOREASE_DIRECTIVE}\n\n${note.trim()}`
-      : MEMOREASE_DIRECTIVE;
+    const directive = memoreaseDirective(context.scope);
+    return note ? `${directive}\n\n${note.trim()}` : directive;
   }
 
   // Similarity ranking only — the curator LLM never runs at boot (it costs a
@@ -318,7 +341,7 @@ export async function buildInstructions(
   // boot runs before any threadId exists.
   recordBootInjectedNames(hits.map((h) => h.name));
 
-  return `${MEMOREASE_DIRECTIVE}\n\n${renderMemoriesSection(hits, {
+  return `${memoreaseDirective(context.scope)}\n\n${renderMemoriesSection(hits, {
     curatorNote: curatorNote(context.config ?? {}),
   })}`;
 }

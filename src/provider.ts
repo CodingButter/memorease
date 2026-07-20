@@ -513,6 +513,13 @@ export function createMemoreaseProvider({
           kind,
           summary: body,
           priority,
+          // Collapse, don't stack: while a memorease notification of this
+          // kind is still *pending* for this thread, a newer one replaces
+          // its summary/payload/priority in place (storage-level coalescing)
+          // instead of piling up. Seventeen unread whispers is nagging, not
+          // intuition. Storages without coalescing support just fall back to
+          // the old stacking behavior.
+          coalesceKey: `memorease:${kind}:${target.threadId}`,
         },
         { threadId: target.threadId, resourceId: target.resourceId },
       );

@@ -1100,7 +1100,40 @@ describe("provider: createMemoreaseSignalProvider subclass", () => {
       priority: "medium",
       coalesceKey: "memorease:gut-feeling:thread-1",
     });
-    expect(notified[0].target).toEqual({ threadId: "thread-1", resourceId: "res-1" });
+    expect(notified[0].target).toEqual({
+      threadId: "thread-1",
+      resourceId: "res-1",
+      ifIdle: { behavior: "persist" },
+    });
+  });
+
+  it("sendSignal targets idle threads with persist, never wake", async () => {
+    // The runtime's default idle behavior is "wake": it starts a fresh agent
+    // run for the target thread. A background-woken code-agent run has no TUI
+    // controller session, so its dynamic model resolver throws "No model
+    // selected. Use /models to select a model first." — memorease must always
+    // opt out of waking.
+    const store = makeMockStore([]);
+    const p = createMemoreaseProvider({
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    const targets: Array<{ ifIdle?: { behavior?: string } }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p as any).notify = async (_input: unknown, target: { ifIdle?: { behavior?: string } }) => {
+      targets.push(target);
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (p as any).sendSignal("gut-feeling", "hint", { threadId: "t", resourceId: "r" }, "high");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (p as any).sendSignal("boot-curation", "boot", { threadId: "t", resourceId: "r" });
+
+    expect(targets).toHaveLength(2);
+    for (const t of targets) {
+      expect(t.ifIdle?.behavior).toBe("persist");
+    }
   });
 });
 

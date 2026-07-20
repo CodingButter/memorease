@@ -521,7 +521,17 @@ export function createMemoreaseProvider({
           // the old stacking behavior.
           coalesceKey: `memorease:${kind}:${target.threadId}`,
         },
-        { threadId: target.threadId, resourceId: target.resourceId },
+        {
+          threadId: target.threadId,
+          resourceId: target.resourceId,
+          // Never wake an idle thread. The default idle behavior is "wake",
+          // which starts a fresh agent run for the target thread — but a
+          // background-woken run has no TUI controller session, so the code
+          // agent's dynamic model resolver throws "No model selected".
+          // Memory whispers are doors, not alarms: persist the signal and let
+          // the thread pick it up on its next run.
+          ifIdle: { behavior: "persist" },
+        },
       );
     }
 

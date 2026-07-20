@@ -121,6 +121,9 @@ describe("instructions: storage reachable", () => {
     // load-bearing. But no `## Memories` section because nothing is stored.
     expect(section).toContain("## Memorease");
     expect(section).toContain("QUERY ON INSTINCT");
+    // Negative-space rules are part of the contract: what NOT to store.
+    expect(section).toContain("What does NOT belong");
+    expect(section).toContain("SECRETS");
     expect(section).not.toContain("## Memories");
   });
 

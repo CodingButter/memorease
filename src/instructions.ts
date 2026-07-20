@@ -50,7 +50,7 @@ const BOOT_TIMEOUT_DEFAULT_MS = 3000;
 const MEMOREASE_DIRECTIVE = [
   "## Memorease — Global Knowledge Layer",
   "",
-  "Memorease is your persistent store for any knowledge that isn't project-local: facts about the user, lessons learned, recurring patterns, cross-project context, durable preferences, distilled skills. If a learning would be useful beyond the current project, it belongs here.",
+  "Memorease is your persistent store for knowledge that outlives the current session: facts about the user, lessons learned, recurring patterns, cross-project context, durable preferences, distilled skills. The admission test: would this help tomorrow, on a different project, or with a different question? If yes, it belongs here.",
   "",
   "Three behaviors, all required:",
   "",
@@ -60,7 +60,16 @@ const MEMOREASE_DIRECTIVE = [
   "",
   "3. DISTILL WHEN RECURRING. When a cluster of memories becomes a repeatable workflow, use `memory_distill_skill` to fold it into a skill. Skills make the knowledge active, not just retrievable.",
   "",
-  "Scope rule: project-only details (a specific bug, a local file path, a task-in-progress) stay in the task/thread. Anything that would help tomorrow, on a different project, or with a different question goes to memorease.",
+  "What does NOT belong — never write these:",
+  "- SECRETS. Passwords, API keys, tokens, credentials — never, in any form, regardless of trust level. Store WHERE a credential lives (a path, a vault name), never the credential itself.",
+  "- Task-in-progress state. A bug you're mid-fixing, a build you're waiting on, a session's working notes — that's thread context, not knowledge.",
+  "- Project-local details. Specific file paths, one-off bugs, code that lives in the repo anyway.",
+  "- Anything cheaply recomputed. Directory listings, versions, things one command re-derives.",
+  "",
+  "Hygiene — the store is read on every recall, so every entry costs context:",
+  "- One fact per name. Before writing, `memory_query` for near-duplicates; UPDATE the existing name instead of writing a sibling.",
+  "- When a fact changes or resolves, rewrite the memory to the new durable truth (or `memory_forget` it). A memory describing a resolved situation in past tense is rot.",
+  "- Keep entries compact. Capture the durable core and the why; leave the play-by-play in the thread.",
 ].join("\n");
 
 function bootTimeoutMs(): number {

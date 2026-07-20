@@ -9,6 +9,7 @@ import {
   ensureSchema,
   INDEX_NAME,
 } from "../src/store.js";
+import type { MastraVector } from "@mastra/core/vector";
 import { writeMemory } from "../src/memory.js";
 import { _resetForTests as resetConfig } from "../src/config.js";
 
@@ -55,7 +56,7 @@ function makeEmptySettings(): string {
 }
 
 let tmpDir: string;
-let store: ReturnType<typeof createVectorStore>;
+let store: MastraVector;
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "memorease-instr-"));
@@ -73,7 +74,7 @@ beforeEach(async () => {
   // resolve to the real user data dir and never see the seeded memory.
   process.env.MEMOREASE_LIBSQL_PATH = libsqlPathEnv(tmpDir);
   // Use a fresh libsql file per test so we don't see cross-test state.
-  store = createVectorStore(makeLibsqlConfig(tmpDir));
+  store = await createVectorStore(makeLibsqlConfig(tmpDir));
   try {
     await store.deleteIndex({ indexName: INDEX_NAME });
   } catch {
@@ -105,15 +106,24 @@ describe("instructions: storage reachable", () => {
 
     expect(section).toContain("## Memories");
     expect(section).toContain("voice-first");
+    // Directive is always prepended — even when memories exist.
+    expect(section).toContain("## Memorease");
+    expect(section).toContain("QUERY ON INSTINCT");
     // Disarmed-curator note is appended when the curator isn't configured.
     expect(section).toMatch(/curator disarmed/);
   });
 
-  it("returns empty string (or just the note) when the store is empty", async () => {
+  it("returns the directive (but no Memories section) when the store is empty", async () => {
     const section = await buildInstructions({
       config: { connectionString: undefined, curatorModel: undefined },
     });
-    // Either empty, or just the curator-disarmed note — never a section.
+    // Fresh sessions must still learn memorease exists — the directive is
+    // load-bearing. But no `## Memories` section because nothing is stored.
+    expect(section).toContain("## Memorease");
+    expect(section).toContain("QUERY ON INSTINCT");
+    // Negative-space rules are part of the contract: what NOT to store.
+    expect(section).toContain("What does NOT belong");
+    expect(section).toContain("SECRETS");
     expect(section).not.toContain("## Memories");
   });
 
@@ -188,7 +198,7 @@ describe("instructions: boot-query timeout", () => {
 
 describe.skipIf(!PG_CONNECTION)("instructions: pg backend", () => {
   beforeEach(async () => {
-    store = createVectorStore({
+    store = await createVectorStore({
       backend: "pg",
       connectionString: PG_CONNECTION!,
     });

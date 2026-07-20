@@ -43,9 +43,9 @@ describe("memory ops: libsql backend", () => {
   let tmpDir: string;
   let store: MastraVector;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "memorease-mem-libsql-"));
-    store = createVectorStore(makeLibsqlConfig(tmpDir));
+    store = await createVectorStore(makeLibsqlConfig(tmpDir));
   });
 
   afterAll(() => {
@@ -127,6 +127,26 @@ describe("memory ops: libsql backend", () => {
     expect(f.ok).toBe(true);
   });
 
+  it("stamps sourceThreadId into metadata when provided, omits when absent", async () => {
+    await writeMemory(store, {
+      name: "with-provenance",
+      content: "written from a live thread",
+      sourceThreadId: "thread-42",
+    });
+    await writeMemory(store, {
+      name: "without-provenance",
+      content: "written with no thread context",
+    });
+
+    const q = await queryMemories(store, "written thread");
+    expect(q.ok).toBe(true);
+    if (!q.ok) return;
+    const withProv = q.value.find((h) => h.name === "with-provenance");
+    const withoutProv = q.value.find((h) => h.name === "without-provenance");
+    expect(withProv?.metadata?.sourceThreadId).toBe("thread-42");
+    expect(withoutProv?.metadata).not.toHaveProperty("sourceThreadId");
+  });
+
   it("caller metadata cannot overwrite system fields (name/content/type)", async () => {
     // Regression: an adversarial `metadata:{name:"evil"}` used to rebind the
     // row's lookup key because caller metadata was spread last. Verify the
@@ -185,8 +205,8 @@ describe.skipIf(!PG_CONNECTION)(
   () => {
     let store: MastraVector;
 
-    beforeAll(() => {
-      store = createVectorStore({
+    beforeAll(async () => {
+      store = await createVectorStore({
         backend: "pg",
         connectionString: PG_CONNECTION!,
       });

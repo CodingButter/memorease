@@ -1,21 +1,43 @@
-import { fastembed } from "@mastra/fastembed";
+// Both onnxruntime-node and @mastra/fastembed are heavy native-binding loads
+// (~85ms combined at import time). They are dynamic-imported on the first
+// embed call rather than at module eval, so plugin import stays cheap and
+// sessions that never call a memory tool pay nothing.
+
+import type { fastembed as fastembedType } from "@mastra/fastembed";
 
 /**
  * Embedding model: `fastembed.small` — 384-dim, local ONNX inference, no API
- * keys. Same model mastracode uses internally for its observational memory
- * system (verified at `sdk/src/agents/memory.ts`).
+ * keys.
  *
  * First call loads the ONNX model (~50MB download from cache, then in-process).
  * Subsequent calls reuse the cached model instance.
  */
 
-let modelPromise: Promise<typeof fastembed.small> | undefined;
+type EmbedModel = typeof fastembedType.small;
 
-async function getModel() {
+let modelPromise: Promise<EmbedModel> | undefined;
+
+async function getModel(): Promise<EmbedModel> {
   if (!modelPromise) {
-    // fastembed.small is a lazy EmbeddingModel getter on the fastembed object.
-    // Accessing it may trigger ONNX init; memoize the resolved instance.
-    modelPromise = Promise.resolve(fastembed.small);
+    modelPromise = (async () => {
+      // ONNX Runtime defaults its global log level to "warning", which emits a
+      // noisy device-discovery probe warning on systems where
+      // /sys/class/drm/card0/device/vendor is unreadable (common in
+      // containers/sandboxes). The warning is cosmetic — inference falls back
+      // to CPU — but it looks unprofessional on startup.
+      //
+      // Pin the level to "error" before any InferenceSession is created. The
+      // `env` object is a process-wide singleton on onnxruntime-common, shared
+      // with fastembed's internal ort import, so setting it here covers
+      // fastembed too. Verified empirically: with this line, the card0 warning
+      // disappears and the embedding output (384-dim) is unchanged. Genuine
+      // errors still surface.
+      const ort = await import("onnxruntime-node");
+      ort.env.logLevel = "error";
+
+      const { fastembed } = await import("@mastra/fastembed");
+      return fastembed.small;
+    })();
   }
   return modelPromise;
 }

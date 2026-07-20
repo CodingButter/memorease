@@ -4,8 +4,8 @@
  * Plugin entry point. Exports a `defineMastraCodePlugin` with:
  *   - `config`: four keys — connectionString, curatorModel, injectBudget, skillsDir.
  *   - `instructions(context)`: at session boot, query the memory store, rank
- *     via the curator if armed (or vector similarity otherwise), and inject a
- *     `## Memories` section into the system prompt. Never throws.
+ *     by vector similarity, and inject a `## Memories` section into the system
+ *     prompt (the curator LLM fires later as a background signal). Never throws.
  *   - `tools(context)`: five tools — memory_query, memory_write, memory_forget,
  *     memory_distill_skill, memory_tap_status.
  *
@@ -25,8 +25,8 @@
 import { defineMastraCodePlugin } from "mastracode/plugin";
 import type { MastraCodePluginContext } from "mastracode/plugin";
 
-import { buildInstructions } from "./instructions.js";
-import { buildTools } from "./tools.js";
+import { buildInstructions } from "./instructions.ts";
+import { buildTools } from "./tools.ts";
 
 export default defineMastraCodePlugin({
   id: "memorease",

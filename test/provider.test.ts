@@ -5,11 +5,17 @@ import { fileURLToPath } from "node:url";
 
 import {
   probeSubscriber,
+  bootCurateSubscriber,
+  bootCurationBody,
   newProbeState,
   extractText,
   extractRecentUserText,
   hintBody,
+  tapPriority,
   TAP_THRESHOLD,
+  TAP_DEDUP_MS,
+  TAP_MEDIUM_THRESHOLD,
+  TAP_HIGH_THRESHOLD,
   createMemoreaseProvider,
   type ProbeState,
   type TapStatus,
@@ -73,7 +79,10 @@ function makeAgent(opts: {
   return agent;
 }
 
-type MockHit = { score: number; metadata?: { name?: string } };
+type MockHit = {
+  score: number;
+  metadata?: { name?: string; content?: string; sourceThreadId?: string };
+};
 
 function makeMockStore(hits: MockHit[]) {
   return {
@@ -136,11 +145,27 @@ describe("provider: text extraction", () => {
     expect(extractRecentUserText(undefined)).toBe("");
   });
 
-  it("hintBody formats the nudge without pasting memory content", () => {
-    const body = hintBody({ name: "voice-first", score: 0.7234 });
+  it("tapPriority maps score to signal level, never urgent", () => {
+    expect(tapPriority(TAP_THRESHOLD)).toBe("low");
+    expect(tapPriority(TAP_MEDIUM_THRESHOLD - 0.01)).toBe("low");
+    expect(tapPriority(TAP_MEDIUM_THRESHOLD)).toBe("medium");
+    expect(tapPriority(TAP_HIGH_THRESHOLD - 0.01)).toBe("medium");
+    expect(tapPriority(TAP_HIGH_THRESHOLD)).toBe("high");
+    expect(tapPriority(0.99)).toBe("high");
+    expect(tapPriority(1)).toBe("high");
+  });
+
+  it("hintBody is a door, not a document: hints at exploration, never content", () => {
+    const body = hintBody([
+      { name: "voice-first", score: 0.7234 },
+      { name: "fleet-ssh-mesh", score: 0.61 },
+    ]);
     expect(body).toContain("voice-first");
-    expect(body).toContain("0.72");
+    expect(body).toContain("fleet-ssh-mesh");
     expect(body).toContain("memory_query");
+    // Framed as starting points for a dive, not as the memory itself.
+    expect(body).toContain("Starting points");
+    expect(body).toMatch(/dig in|explore/);
   });
 });
 
@@ -181,6 +206,97 @@ describe("provider: probeSubscriber", () => {
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0].body).toContain("voice-first");
     expect(state.notifiedCount).toBe(1);
+  });
+
+  it("resolves memory via async agent.getMemory() when .memory is absent (real Agent shape)", async () => {
+    // Real mastra Agents expose memory behind getMemory(), not a .memory prop.
+    const agent = {
+      getMemory: async () => ({
+        recall: async () => ({
+          messages: [{ role: "user", content: "what does jamie prefer?" }],
+        }),
+      }),
+    };
+    const store = makeMockStore([
+      { score: TAP_THRESHOLD + 0.1, metadata: { name: "voice-first" } },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1, 2, 3]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("provenance gate: skips a hit the same thread wrote, taps the next candidate", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "tell me about the provider" }],
+      }),
+    });
+    // Top hit was authored by THIS thread — must be skipped; runner-up wins.
+    const store = makeMockStore([
+      {
+        score: TAP_THRESHOLD + 0.3,
+        metadata: { name: "self-authored", sourceThreadId: SUB.threadId },
+      },
+      {
+        score: TAP_THRESHOLD + 0.1,
+        metadata: { name: "other-thread", sourceThreadId: "someone-else" },
+      },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].body).toContain("other-thread");
+    expect(notifyCalls[0].body).not.toContain("self-authored");
+  });
+
+  it("provenance gate: silent when every above-threshold hit is self-authored", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "tell me about the provider" }],
+      }),
+    });
+    const store = makeMockStore([
+      {
+        score: TAP_THRESHOLD + 0.3,
+        metadata: { name: "self-authored", sourceThreadId: SUB.threadId },
+      },
+    ]);
+
+    const result = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+    expect(result).toBe("skipped-below-threshold");
+    expect(notifyCalls).toHaveLength(0);
   });
 
   it("skips when top hit is below TAP_THRESHOLD", async () => {
@@ -241,6 +357,126 @@ describe("provider: probeSubscriber", () => {
     expect(r1).toBe("notified");
     expect(r2).toBe("skipped-deduped");
     expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("passes score-derived priority to notify: strong hit taps high, borderline taps low", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const priorities: string[] = [];
+    const notify = async (
+      _body: string,
+      _sub: unknown,
+      priority: string,
+    ) => {
+      priorities.push(priority);
+    };
+
+    // Strong resonance → high.
+    await probeSubscriber(
+      () => agent,
+      makeMockStore([
+        { score: TAP_HIGH_THRESHOLD + 0.05, metadata: { name: "strong" } },
+      ]) as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Borderline resonance (different thread state) → low.
+    const state2 = newProbeState();
+    await probeSubscriber(
+      () => agent,
+      makeMockStore([
+        { score: TAP_THRESHOLD + 0.01, metadata: { name: "borderline" } },
+      ]) as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state2,
+      notify,
+    );
+
+    expect(priorities).toEqual(["high", "low"]);
+  });
+
+  it("progress gate: idle conversation never re-taps, even after the dedup window", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "same-hit" } },
+    ]);
+    const notify = async (body: string) => {
+      notifyCalls.push({ body, sub: SUB });
+    };
+
+    const r1 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Simulate the dedup window having long expired — but no new user text.
+    const rec = state.lastNotifiedPerThread.get(SUB.threadId)!;
+    rec.at = Date.now() - TAP_DEDUP_MS * 10;
+    const r2 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("skipped-deduped");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("progress gate: new user text after the window re-taps", async () => {
+    let text = "hello";
+    const agent = makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: text }],
+      }),
+    });
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "same-hit" } },
+    ]);
+    const notify = async (body: string) => {
+      notifyCalls.push({ body, sub: SUB });
+    };
+
+    const r1 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+    // Conversation moved AND the dedup window expired.
+    text = "now talking about something new";
+    const rec = state.lastNotifiedPerThread.get(SUB.threadId)!;
+    rec.at = Date.now() - TAP_DEDUP_MS * 10;
+    const r2 = await probeSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("notified");
+    expect(notifyCalls).toHaveLength(2);
   });
 
   it("skips when recall returns no usable text", async () => {
@@ -362,6 +598,197 @@ describe("provider: probeSubscriber", () => {
   });
 });
 
+// --- bootCurateSubscriber: background curation signal ---------------------
+
+describe("provider: bootCurateSubscriber", () => {
+  let state: ProbeState;
+  let notifyCalls: Array<{ body: string; sub: typeof SUB }>;
+
+  const OPTS_BASE = { modelId: "test/model", budget: 1200 };
+
+  function chattyAgent() {
+    return makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "working on the memorease plugin" }],
+      }),
+    });
+  }
+
+  function stubCurate(hits: Array<{ name: string; content?: string }>, usedCurator: boolean) {
+    return async () => ({
+      hits: hits.map((h, i) => ({
+        id: String(i),
+        score: 0.9 - i * 0.1,
+        name: h.name,
+        content: h.content ?? "",
+      })),
+      usedCurator,
+    });
+  }
+
+  beforeEach(() => {
+    state = newProbeState();
+    notifyCalls = [];
+  });
+
+  const notify = async (body: string, sub: typeof SUB) => {
+    notifyCalls.push({ body, sub });
+  };
+
+  it("notifies with curated memory names (never content) and marks the thread done", async () => {
+    const store = makeMockStore([
+      { score: 0.8, metadata: { name: "voice-first", content: "SECRET CONTENT" } },
+    ]);
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "voice-first", content: "SECRET CONTENT" }], true) },
+    );
+
+    expect(result).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].body).toContain("voice-first");
+    expect(notifyCalls[0].body).toContain("memory_query");
+    expect(notifyCalls[0].body).not.toContain("SECRET CONTENT");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+    expect(state.bootCuratedCount).toBe(1);
+  });
+
+  it("is one-shot per thread — second call skips without touching the curator", async () => {
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+    let curateCalls = 0;
+    const countingCurate = async () => {
+      curateCalls++;
+      return {
+        hits: [{ id: "0", score: 0.9, name: "m", content: "" }],
+        usedCurator: true,
+      };
+    };
+
+    const r1 = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: countingCurate },
+    );
+    const r2 = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: countingCurate },
+    );
+
+    expect(r1).toBe("notified");
+    expect(r2).toBe("skipped-already-curated");
+    expect(curateCalls).toBe(1);
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("suppresses the signal on curator fallback (similarity = what boot already injected)", async () => {
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "m" }], false) },
+    );
+
+    expect(result).toBe("skipped-curator-fallback");
+    expect(notifyCalls).toHaveLength(0);
+    // Terminal — don't re-spend the LLM roundtrip next poll.
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+  });
+
+  it("retries later when recall has no usable text yet (not terminal)", async () => {
+    const agent = makeAgent({ recallImpl: async () => ({ messages: [] }) });
+    const store = makeMockStore([{ score: 0.8, metadata: { name: "m" } }]);
+
+    const result = await bootCurateSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      { ...OPTS_BASE, curateFn: stubCurate([{ name: "m" }], true) },
+    );
+
+    expect(result).toBe("skipped-no-text");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(false);
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("marks done on empty store without calling the curator", async () => {
+    const store = makeMockStore([]);
+    let curateCalls = 0;
+
+    const result = await bootCurateSubscriber(
+      () => chattyAgent(),
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      {
+        ...OPTS_BASE,
+        curateFn: async () => {
+          curateCalls++;
+          return { hits: [], usedCurator: false };
+        },
+      },
+    );
+
+    expect(result).toBe("skipped-empty-store");
+    expect(curateCalls).toBe(0);
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(true);
+  });
+
+  it("swallows throws and records lastError (not terminal)", async () => {
+    const agent = makeAgent({
+      recallImpl: async () => {
+        throw new Error("recall exploded");
+      },
+    });
+    const store = makeMockStore([]);
+
+    const result = await bootCurateSubscriber(
+      () => agent,
+      store as never,
+      makeMockEmbedder([1]),
+      SUB,
+      state,
+      notify,
+      OPTS_BASE,
+    );
+
+    expect(result).toBe("error");
+    expect(state.lastError).toContain("recall exploded");
+    expect(state.bootCuratedThreads.has(SUB.threadId)).toBe(false);
+  });
+
+  it("bootCurationBody lists names and points at memory_query", () => {
+    const body = bootCurationBody(["a-memory", "b-memory"]);
+    expect(body).toContain("'a-memory'");
+    expect(body).toContain("'b-memory'");
+    expect(body).toContain("memory_query");
+  });
+});
+
 // --- armProvider: live-agent ladder ---------------------------------------
 
 describe("provider: armProvider", () => {
@@ -460,6 +887,69 @@ describe("provider: armProvider", () => {
     expect(r1.freshlyArmed).toBe(true);
     expect(r2.freshlyArmed).toBe(false);
     expect(r2.status).toBe("armed");
+  });
+
+  it("subscribes the calling thread on fresh arm (poll has something to iterate)", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+
+    await armProvider({
+      toolCtx: {
+        agent: { agentId: "a1", threadId: "t1", resourceId: "r1" },
+        mastra,
+      },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    const status = tapStatus();
+    expect(status.status).toBe("armed");
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(1);
+  });
+
+  it("registers new threads on memoized calls and dedups repeats", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+    const ctxFor = (threadId: string) => ({
+      agent: { agentId: "a1", threadId, resourceId: "r1" },
+      mastra,
+    });
+
+    await armProvider({ toolCtx: ctxFor("t1"), store: store as never, embedFn: makeMockEmbedder([1]) });
+    // Same thread again — must not double-subscribe.
+    await armProvider({ toolCtx: ctxFor("t1"), store: store as never, embedFn: makeMockEmbedder([1]) });
+    // A second thread arriving later in the process — must get its own sub.
+    await armProvider({ toolCtx: ctxFor("t2"), store: store as never, embedFn: makeMockEmbedder([1]) });
+
+    const status = tapStatus();
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(2);
+  });
+
+  it("arms without a subscription when toolCtx lacks threadId (no throw)", async () => {
+    const store = makeMockStore([]);
+    const mastra = {
+      getAgentById: () => ({ id: "a1", sendNotificationSignal: () => {} }),
+    };
+
+    const result = await armProvider({
+      toolCtx: { agent: { agentId: "a1" }, mastra },
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    expect(result.status).toBe("armed");
+    const status = tapStatus();
+    expect(
+      (status.provider as { subscriptionCount: number }).subscriptionCount,
+    ).toBe(0);
   });
 });
 

@@ -19,12 +19,12 @@
 
 import type { MastraVector } from "@mastra/core/vector";
 
-import { embed } from "./embed.js";
-import { createMemoreaseProvider, type TapStatus } from "./provider.js";
+import { embed } from "./embed.ts";
+import { createMemoreaseProvider, type TapStatus } from "./provider.ts";
 
 /** Minimal tool-context surface this module needs. */
 export type ToolCtxLike = {
-  agent?: { agentId?: string };
+  agent?: { agentId?: string; threadId?: string; resourceId?: string };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   mastra?: any;
 };
@@ -96,6 +96,28 @@ export function findLiveAgent(
   return undefined;
 }
 
+/**
+ * Register the calling thread with the armed provider. Called on EVERY
+ * armProvider hit (fresh and memoized) — arming happens once per process,
+ * but new threads keep arriving for the process lifetime and each needs its
+ * own subscription or `poll()` never sees it. Fail-soft: missing thread ids
+ * or a disarmed provider are silent no-ops.
+ */
+function subscribeThreadFromCtx(
+  provider: unknown,
+  toolCtx: ToolCtxLike | undefined,
+): void {
+  const threadId = toolCtx?.agent?.threadId;
+  const resourceId = toolCtx?.agent?.resourceId;
+  if (!provider || !threadId || !resourceId) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (provider as any).subscribeThread?.(threadId, resourceId);
+  } catch {
+    // fail-soft — a subscription failure must not break the tool call
+  }
+}
+
 type ArmedState = {
   // `unknown` because the provider instance is an opaque subclass of
   // SignalProvider; we only need its `getStatus()` method via cast.
@@ -119,6 +141,10 @@ export async function armProvider(args: {
   store: MastraVector;
   embedFn?: (text: string) => Promise<number[]>;
   pollIntervalMs?: number;
+  /** Curator model id for the background boot-curation signal (optional). */
+  curatorModelId?: string;
+  /** Character budget for the curated selection (optional). */
+  injectBudget?: number;
 }): Promise<ArmResult> {
   if (armingPromise) {
     await armingPromise;
@@ -126,11 +152,13 @@ export async function armProvider(args: {
   if (armed) {
     // Memoized hit (either pre-existing or just resolved by the promise
     // above): the provider is already connected, but THIS call didn't perform
-    // the connect dance — report `freshlyArmed: false`.
+    // the connect dance — report `freshlyArmed: false`. Still register the
+    // calling thread: subscriptions are per-thread, arming is per-process.
+    subscribeThreadFromCtx(armed.provider, args.toolCtx);
     return { ...armed.result, freshlyArmed: false };
   }
   armingPromise = (async () => {
-    const { toolCtx, store, embedFn, pollIntervalMs } = args;
+    const { toolCtx, store, embedFn, pollIntervalMs, curatorModelId, injectBudget } = args;
     if (!toolCtx?.mastra) {
       const result: ArmResult = {
         status: "disarmed-no-agent",
@@ -153,6 +181,8 @@ export async function armProvider(args: {
         store,
         embedFn: embedFn ?? embed,
         pollIntervalMs,
+        curatorModelId,
+        injectBudget,
       });
       // The provider's base class exposes `connect(agent)` and
       // `startPolling()` as public methods. Cast through unknown to satisfy
@@ -169,6 +199,7 @@ export async function armProvider(args: {
       }
       p.connect(found.agent);
       p.startPolling();
+      subscribeThreadFromCtx(provider, toolCtx);
       const result: ArmResult = {
         status: "armed",
         via: found.via,

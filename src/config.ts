@@ -18,11 +18,15 @@ export type ResolvedConfig = {
   libsqlUrl?: string;
 };
 
+/** Install scope mastracode passes in the plugin context. */
+export type PluginScope = "global" | "project";
+
 /**
  * MastraCode plugin context shape — minimal subset we read. The full type
  * lives in `src/index.ts`; here we only declare what `instructions` needs.
  */
 export type PluginContext = {
+  scope?: PluginScope;
   config?: {
     connectionString?: string;
     curatorModel?: string;

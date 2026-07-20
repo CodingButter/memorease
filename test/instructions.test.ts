@@ -127,6 +127,45 @@ describe("instructions: storage reachable", () => {
     expect(section).not.toContain("## Memories");
   });
 
+  it("renders the global-scope directive by default (no scope in context)", async () => {
+    const section = await buildInstructions({
+      config: { connectionString: undefined, curatorModel: undefined },
+    });
+    expect(section).toContain("Global Knowledge Layer");
+    // Global scope excludes project-local details from the store.
+    expect(section).toContain("Project-local details");
+    expect(section).not.toContain("Project Knowledge Layer");
+  });
+
+  it("renders the project-scope directive when scope is 'project'", async () => {
+    const section = await buildInstructions({
+      scope: "project",
+      config: { connectionString: undefined, curatorModel: undefined },
+    });
+    expect(section).toContain("Project Knowledge Layer");
+    // Project scope inverts the scope rule: project knowledge belongs here,
+    // personal/off-project knowledge is excluded instead.
+    expect(section).toContain("Personal or off-project knowledge");
+    expect(section).not.toContain("Project-local details");
+    // Session-in-progress state is excluded in BOTH scopes.
+    expect(section).toContain("Session-in-progress state");
+    expect(section).toContain("SECRETS");
+  });
+
+  it("prepends the scope-correct directive when memories exist", async () => {
+    await writeMemory(store, {
+      name: "api-conventions",
+      content: "This project uses REST with cursor pagination.",
+    });
+    const section = await buildInstructions({
+      scope: "project",
+      config: { connectionString: undefined, curatorModel: undefined, injectBudget: "2000" },
+    });
+    expect(section).toContain("Project Knowledge Layer");
+    expect(section).toContain("## Memories");
+    expect(section).toContain("api-conventions");
+  });
+
   it("appends no disarmed note when curatorModel is set", async () => {
     await writeMemory(store, {
       name: "any",

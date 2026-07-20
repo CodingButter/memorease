@@ -263,6 +263,13 @@ bash .mastracode/plans/memorease.proof/run-local.sh   # libsql demo → transcri
 
 - **Fleet memory sharing** — first-class multi-machine story (today: works
   through shared Postgres, but there's no built-in sync for the libsql path).
+- **Two-tier memory (personal + project)** — a project-scoped install
+  replaces the global plugin (mastracode merges registries by plugin id,
+  project wins), so today a team-shared project store unmounts your personal
+  one inside that project. Planned: the project-scoped instance opens both
+  stores, tags which layer each memory came from, and writes to the team
+  store by default. The boot directive's "global knowledge only" scope rule
+  inverts for a project store and will adapt with it.
 - **Optional remote embedding provider** — an opt-in API-based embedder
   (local fastembed stays the default). Requires a dimension-migration story,
   since embeddings from different models can't share one index.

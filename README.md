@@ -79,7 +79,7 @@ schema and are editable from the TUI.
 | `connectionString`| string   | `""`           | Postgres connection string. Empty = auto-detect (see [Storage backends](#storage-backends)).                                                             |
 | `curatorModel`    | `model`  | `""`           | LLM used by the background curation signal (fires after boot; see [Boot injection](#boot-injection--background-curation)). Empty = auto-default to mastracode's configured observer model; if that's empty too, curation is disarmed and boot ranking stays pure vector-similarity. |
 | `injectBudget`    | string   | `"1200"`       | Approximate character budget for the injected `## Memories` section. Coerced to int and clamped to 200–8000.                                             |
-| `skillsDir`       | string   | `""` (`~/.agents/skills`) | Where `memory_distill_skill` writes `SKILL.md` files.                                                                                                  |
+| `skillsDir`       | string   | `""` (`.agents/skills` under the scope root) | Where `memory_distill_skill` writes `SKILL.md` files. Global installs anchor at `~`; project installs anchor at the project root — commit the project's `.agents/skills` and the team shares distilled skills on the next pull. |
 
 **You usually don't need to set any of them.** The defaults pick SQLite +
 local embeddings + mastracode's observer model (or vector-similarity fallback)

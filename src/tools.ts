@@ -19,7 +19,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { resolveConfig, type PluginContext } from "./config.ts";
+import { resolveConfig, type PluginContext, type PluginScope } from "./config.ts";
 import {
   createVectorStore,
   ensureSchema,
@@ -148,14 +148,26 @@ export function _resetStoreForTests(): void {
 }
 
 /**
- * Resolve the skills directory. Honors `config.skillsDir` (if non-empty),
- * otherwise defaults to `~/.agents/skills`. Relative paths are resolved
- * against the user's home dir (not cwd) for stability across sessions.
+ * Resolve the skills directory. Honors `config.skillsDir` (if non-empty);
+ * empty defaults to `.agents/skills` under the scope's root.
+ *
+ * Scope-aware, like the boot directive: a GLOBAL install anchors at the
+ * user's home dir (`~/.agents/skills`, stable across sessions regardless of
+ * cwd). A PROJECT install anchors at the project root — distilled skills
+ * land inside the repo, where mastracode already scans `.agents/skills`,
+ * so a team that commits that directory shares skills on the next pull.
+ * Relative `skillsDir` values resolve against the same anchor; absolute
+ * paths are taken as-is.
  */
-function resolveSkillsDir(skillsDir?: string): string {
+export function resolveSkillsDir(
+  skillsDir: string | undefined,
+  opts: { scope?: PluginScope; cwd?: string } = {},
+): string {
+  const anchor =
+    opts.scope === "project" ? (opts.cwd ?? process.cwd()) : homedir();
   const raw = (skillsDir ?? "").trim();
-  if (!raw) return join(homedir(), ".agents", "skills");
-  return resolve(homedir(), raw);
+  if (!raw) return join(anchor, ".agents", "skills");
+  return resolve(anchor, raw);
 }
 
 /**
@@ -206,6 +218,7 @@ function formatSkillFile(args: {
 
 export function buildTools(context: MastraCodePluginContext) {
   const ctx = context as unknown as PluginContext & {
+    cwd?: string;
     config?: { skillsDir?: string };
   };
 
@@ -369,7 +382,10 @@ export function buildTools(context: MastraCodePluginContext) {
       }
       try {
         const { store } = await getStore(ctx, toolCtx);
-        const skillsDir = resolveSkillsDir(ctx.config?.skillsDir);
+        const skillsDir = resolveSkillsDir(ctx.config?.skillsDir, {
+          scope: ctx.scope,
+          cwd: ctx.cwd,
+        });
         const skillDir = join(skillsDir, input.slug);
         const skillPath = join(skillDir, "SKILL.md");
         const distilledAt = new Date().toISOString();

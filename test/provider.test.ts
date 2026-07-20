@@ -1066,6 +1066,42 @@ describe("provider: createMemoreaseSignalProvider subclass", () => {
     expect(s.notifiedCount).toBe(0);
     expect(typeof s.armed).toBe("boolean");
   });
+
+  it("sendSignal passes a per-thread coalesceKey so pending taps collapse instead of stacking", async () => {
+    const store = makeMockStore([]);
+    const p = createMemoreaseProvider({
+      store: store as never,
+      embedFn: makeMockEmbedder([1]),
+    });
+
+    // Capture what reaches the base class's protected `notify` — the
+    // coalesceKey is what lets storage replace a still-pending notification
+    // in place (threadId+source+kind+coalesceKey match) instead of piling
+    // up a backlog.
+    const notified: Array<{ input: Record<string, unknown>; target: unknown }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p as any).notify = async (input: Record<string, unknown>, target: unknown) => {
+      notified.push({ input, target });
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (p as any).sendSignal(
+      "gut-feeling",
+      "hint body",
+      { threadId: "thread-1", resourceId: "res-1" },
+      "medium",
+    );
+
+    expect(notified).toHaveLength(1);
+    expect(notified[0].input).toMatchObject({
+      source: "memorease",
+      kind: "gut-feeling",
+      summary: "hint body",
+      priority: "medium",
+      coalesceKey: "memorease:gut-feeling:thread-1",
+    });
+    expect(notified[0].target).toEqual({ threadId: "thread-1", resourceId: "res-1" });
+  });
 });
 
 // --- type-strip safety: no enum/namespace in src/ -------------------------

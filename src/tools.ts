@@ -32,6 +32,7 @@ import {
 } from "./memory.ts";
 import { armProvider, tapStatus, type ToolCtxLike } from "./observer.ts";
 import { resolveCuratorModel, resolveInjectBudget } from "./curator.ts";
+import { recordSurfaced } from './surfaced.ts';
 
 /**
  * Lazily-resolved store handle. The first tool call pays the ONNX warm-up and
@@ -232,6 +233,13 @@ export function buildTools(context: MastraCodePluginContext) {
           topK: input.k ?? 5,
         });
         if (!res.ok) return res;
+        // The thread now holds these memories' content — record them in the
+        // surfaced ledger so the gut-feeling tap never re-suggests them here.
+        // Fire-and-forget: ledger failures must not slow or break the query.
+        const threadId = toolCtx?.agent?.threadId;
+        if (threadId) {
+          void recordSurfaced(threadId, res.value.map((h) => h.name));
+        }
         return { ok: true as const, results: res.value };
       } catch (err) {
         return {

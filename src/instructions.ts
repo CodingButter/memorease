@@ -35,6 +35,7 @@ import {
   resolveInjectBudget,
 } from "./curator.ts";
 import { failSoft, type StorageResult } from "./errors.ts";
+import { recordBootInjectedNames } from './surfaced.ts';
 
 const BOOT_TIMEOUT_DEFAULT_MS = 3000;
 
@@ -311,6 +312,11 @@ export async function buildInstructions(
   // background signal (see provider.ts `bootCurateSubscriber`), where it can
   // also consider the live conversation.
   const hits = rankAndTruncate(candidates, budget);
+
+  // Record the injected names so the gut-feeling tap never re-surfaces a
+  // memory this session was already handed at boot. Process-global set —
+  // boot runs before any threadId exists.
+  recordBootInjectedNames(hits.map((h) => h.name));
 
   return `${MEMOREASE_DIRECTIVE}\n\n${renderMemoriesSection(hits, {
     curatorNote: curatorNote(context.config ?? {}),

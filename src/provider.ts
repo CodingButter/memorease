@@ -29,6 +29,12 @@ import { INDEX_NAME } from "./store.ts";
 import { curateForBoot, INJECT_BUDGET_DEFAULT } from "./curator.ts";
 import { buildBootQuery, buildSessionContext } from "./instructions.ts";
 import type { MemoryHit } from "./memory.ts";
+import {
+  bootInjectedNames,
+  getSurfaced,
+  isSuppressed,
+  recordSurfaced,
+} from "./surfaced.ts";
 
 export type TapStatus =
   | "armed"
@@ -263,6 +269,9 @@ type AgentGetter = () => LiveAgentLike | undefined;
  * Returns the resolution status for this probe:
  *  - "notified" — a notification was sent.
  *  - "skipped-below-threshold" — top hit was below TAP_THRESHOLD.
+ *  - "skipped-already-surfaced" — threshold-passing hits exist but every one
+ *    was already shown to this thread (boot injection, memory_query, or an
+ *    earlier signal) and none was updated since.
  *  - "skipped-deduped" — same hit was notified for this thread within window.
  *  - "skipped-no-text" — recall returned no usable text.
  *  - "disarmed-no-memory" — agent.memory.recall not available.
@@ -279,7 +288,7 @@ export async function probeSubscriber(
     sub: SubLike,
     priority: SignalPriority,
   ) => Promise<void>,
-): Promise<"notified" | "skipped-below-threshold" | "skipped-deduped" | "skipped-no-text" | "disarmed-no-memory" | "error"> {
+): Promise<"notified" | "skipped-below-threshold" | "skipped-already-surfaced" | "skipped-deduped" | "skipped-no-text" | "disarmed-no-memory" | "error"> {
   try {
     const memory = await resolveMemory(getAgent());
     if (!memory?.recall) {
@@ -305,12 +314,29 @@ export async function probeSubscriber(
     // Provenance gate: never tap a thread about a memory that thread itself
     // wrote — the knowledge is already in its context. Memories written
     // before this gate existed carry no sourceThreadId and pass through.
-    const eligible = hits.filter(
+    const strong = hits.filter(
       (h) =>
         h.metadata?.sourceThreadId !== sub.threadId &&
         h.score >= TAP_THRESHOLD,
     );
-    if (eligible.length === 0) return "skipped-below-threshold";
+    if (strong.length === 0) return "skipped-below-threshold";
+
+    // Surfaced gate: never tap about a memory this thread has already been
+    // shown — boot-injected, returned by memory_query, or named by an earlier
+    // tap/boot-curation. Once surfaced it lives in the thread's context (and
+    // in observational memory), so repeating it is noise. A memory updated
+    // AFTER it was surfaced is news again and passes (see `isSuppressed`).
+    const surfaced = await getSurfaced(sub.threadId);
+    const boot = bootInjectedNames();
+    const eligible = strong.filter((h) => {
+      const hitName = String(h.metadata?.name ?? "");
+      const updatedAt =
+        typeof h.metadata?.updatedAt === "string"
+          ? h.metadata.updatedAt
+          : undefined;
+      return !boot.has(hitName) && !isSuppressed(surfaced, hitName, updatedAt);
+    });
+    if (eligible.length === 0) return "skipped-already-surfaced";
 
     const name = String(eligible[0].metadata?.name ?? "");
     const now = Date.now();
@@ -334,6 +360,9 @@ export async function probeSubscriber(
     await notify(hintBody(starters), sub, tapPriority(eligible[0].score));
     state.lastNotifiedPerThread.set(sub.threadId, { name, at: now, text: recent });
     state.notifiedCount += 1;
+    // The starters' names are now in the thread's context — persist that so
+    // no future poll (or process) taps about them again.
+    await recordSurfaced(sub.threadId, starters.map((s) => s.name));
     return "notified";
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err);
@@ -428,6 +457,7 @@ export async function bootCurateSubscriber(
     await notify(bootCurationBody(curate.hits.map((h) => h.name)), sub);
     state.bootCuratedThreads.add(sub.threadId);
     state.bootCuratedCount += 1;
+    await recordSurfaced(sub.threadId, curate.hits.map((h) => h.name));
     return "notified";
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err);

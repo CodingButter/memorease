@@ -28,6 +28,28 @@ import {
 } from "../src/observer.js";
 import { _resetStoreForTests } from "../src/tools.js";
 import { _resetForTests as resetConfig } from "../src/config.js";
+import {
+  _resetSurfacedForTests,
+  recordBootInjectedNames,
+  recordSurfaced,
+} from "../src/surfaced.js";
+import { tmpdir } from "node:os";
+
+// The surfaced ledger persists across processes by design — point it at a
+// fresh temp file per test so notified names from one test (or a previous
+// run) never suppress probes in the next.
+let surfacedSeq = 0;
+beforeEach(() => {
+  process.env.MEMOREASE_SURFACED_PATH = join(
+    tmpdir(),
+    `memorease-surfaced-test-${process.pid}-${++surfacedSeq}.json`,
+  );
+  _resetSurfacedForTests();
+});
+
+afterEach(() => {
+  delete process.env.MEMOREASE_SURFACED_PATH;
+});
 
 /**
  * Provider tests cover the fail-soft surface of the gut-feeling signal layer.
@@ -81,7 +103,12 @@ function makeAgent(opts: {
 
 type MockHit = {
   score: number;
-  metadata?: { name?: string; content?: string; sourceThreadId?: string };
+  metadata?: {
+    name?: string;
+    content?: string;
+    sourceThreadId?: string;
+    updatedAt?: string;
+  };
 };
 
 function makeMockStore(hits: MockHit[]) {
@@ -330,8 +357,17 @@ describe("provider: probeSubscriber", () => {
         messages: [{ role: "user", content: "hello" }],
       }),
     });
+    // updatedAt in the future so the surfaced-names ledger's escape hatch
+    // lets the hit through — the in-memory dedup gates are the backstop for
+    // exactly this "memory updated since surfaced" path.
     const store = makeMockStore([
-      { score: 0.9, metadata: { name: "same-hit" } },
+      {
+        score: 0.9,
+        metadata: {
+          name: "same-hit",
+          updatedAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
     ]);
     const notify = async (body: string) => {
       notifyCalls.push({ body, sub: SUB });
@@ -407,8 +443,15 @@ describe("provider: probeSubscriber", () => {
         messages: [{ role: "user", content: "hello" }],
       }),
     });
+    // Future updatedAt: pass the surfaced gate, exercise the progress gate.
     const store = makeMockStore([
-      { score: 0.9, metadata: { name: "same-hit" } },
+      {
+        score: 0.9,
+        metadata: {
+          name: "same-hit",
+          updatedAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
     ]);
     const notify = async (body: string) => {
       notifyCalls.push({ body, sub: SUB });
@@ -446,8 +489,15 @@ describe("provider: probeSubscriber", () => {
         messages: [{ role: "user", content: text }],
       }),
     });
+    // Future updatedAt: pass the surfaced gate, exercise the progress gate.
     const store = makeMockStore([
-      { score: 0.9, metadata: { name: "same-hit" } },
+      {
+        score: 0.9,
+        metadata: {
+          name: "same-hit",
+          updatedAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
     ]);
     const notify = async (body: string) => {
       notifyCalls.push({ body, sub: SUB });
@@ -595,6 +645,112 @@ describe("provider: probeSubscriber", () => {
 
     expect(result).toBe("error");
     expect(state.lastError).toContain("onnx load failed");
+  });
+});
+
+// --- probeSubscriber: surfaced-names gate ---------------------------------
+
+describe("provider: surfaced-names gate", () => {
+  let state: ProbeState;
+  let notifyCalls: Array<{ body: string; sub: typeof SUB }>;
+
+  const agent = () =>
+    makeAgent({
+      recallImpl: async () => ({
+        messages: [{ role: "user", content: "what does jamie prefer?" }],
+      }),
+    });
+
+  const probe = (store: ReturnType<typeof makeMockStore>) =>
+    probeSubscriber(
+      () => agent(),
+      store as never,
+      makeMockEmbedder([1, 2, 3]),
+      SUB,
+      state,
+      async (body, sub) => {
+        notifyCalls.push({ body, sub });
+      },
+    );
+
+  beforeEach(() => {
+    state = newProbeState();
+    notifyCalls = [];
+  });
+
+  it("suppresses a hit previously surfaced to this thread (ledger persists)", async () => {
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "voice-first" } },
+    ]);
+    expect(await probe(store)).toBe("notified");
+
+    // Fresh state = new process. In-memory dedup is gone; only the ledger
+    // remembers. Same hit must now be suppressed.
+    state = newProbeState();
+    expect(await probe(store)).toBe("skipped-already-surfaced");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("suppresses boot-injected names without any ledger entry", async () => {
+    recordBootInjectedNames(["boot-memory"]);
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "boot-memory" } },
+    ]);
+    expect(await probe(store)).toBe("skipped-already-surfaced");
+    expect(notifyCalls).toHaveLength(0);
+  });
+
+  it("a memory updated after surfacing is news again and taps", async () => {
+    await recordSurfaced(SUB.threadId, ["voice-first"], new Date("2026-07-19T00:00:00Z"));
+    const store = makeMockStore([
+      {
+        score: 0.9,
+        metadata: { name: "voice-first", updatedAt: "2026-07-20T00:00:00Z" },
+      },
+    ]);
+    expect(await probe(store)).toBe("notified");
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("falls through to the next unsurfaced hit when the top hit is surfaced", async () => {
+    await recordSurfaced(SUB.threadId, ["seen-before"]);
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "seen-before" } },
+      { score: 0.7, metadata: { name: "never-seen" } },
+    ]);
+    expect(await probe(store)).toBe("notified");
+    expect(notifyCalls[0].body).toContain("never-seen");
+    expect(notifyCalls[0].body).not.toContain("seen-before");
+  });
+
+  it("memory_query surfacing gates the probe (cross-channel)", async () => {
+    // Simulate the tools.ts wiring: a query surfaced this name to the thread.
+    await recordSurfaced(SUB.threadId, ["queried-memory"]);
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "queried-memory" } },
+    ]);
+    expect(await probe(store)).toBe("skipped-already-surfaced");
+  });
+
+  it("ledger is thread-scoped: another thread still gets the tap", async () => {
+    await recordSurfaced("some-other-thread", ["voice-first"]);
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "voice-first" } },
+    ]);
+    expect(await probe(store)).toBe("notified");
+  });
+
+  it("fails soft when the ledger path is unwritable", async () => {
+    // A regular file used as a parent directory → mkdir fails ENOTDIR fast.
+    const { writeFileSync } = await import("node:fs");
+    const blocker = join(tmpdir(), `memorease-probe-blocker-${process.pid}`);
+    writeFileSync(blocker, "", "utf8");
+    process.env.MEMOREASE_SURFACED_PATH = join(blocker, "ledger.json");
+    const store = makeMockStore([
+      { score: 0.9, metadata: { name: "voice-first" } },
+    ]);
+    // Read fails → empty ledger → tap proceeds; write fails → swallowed.
+    expect(await probe(store)).toBe("notified");
   });
 });
 
